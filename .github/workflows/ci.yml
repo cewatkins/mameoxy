@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test (linux-x64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore MameAo.slnx
+
+      - name: Build
+        run: dotnet build MameAo.slnx -c Release --no-restore
+
+      - name: Test
+        run: dotnet test tests/MameAo.Tests/MameAo.Tests.csproj -c Release --no-build --logger "console;verbosity=normal"
+
+  package:
+    name: Package (${{ matrix.rid }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            runner: ubuntu-24.04
+          - rid: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Package
+        run: ./packaging/pack.sh "${{ matrix.rid }}" "${GITHUB_REF_NAME#v}"
+
+      - name: Smoke test the packed binary
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          archive="dist/mame-ao-${version}-${{ matrix.rid }}.tar.gz"
+          tar -tzf "$archive"
+          mkdir -p "$RUNNER_TEMP/smoke"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/smoke" --strip-components=1
+          "$RUNNER_TEMP/smoke/mame-ao" --version
+          "$RUNNER_TEMP/smoke/mame-ao" --help > /dev/null
+          # The executable must be a single-file self-contained build: no
+          # neighbouring managed DLLs, and the embedded client must round-trip.
+          test "$(ls "$RUNNER_TEMP/smoke" | wc -l)" -ge 4
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mame-ao-${{ matrix.rid }}
+          path: dist/mame-ao-*-${{ matrix.rid }}.tar.gz*
+
+  windows:
+    name: Windows compile check (shared core)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # The Linux host is deliberately not built here. This job keeps the shared
+      # core compiling for Windows so the original program can still be built
+      # from the same sources.
+      - name: Build core and BitTorrent client
+        run: |
+          dotnet build src/MameAo.Core/MameAo.Core.csproj -c Release
+          dotnet build src/MameAo.Bt/MameAo.Bt.csproj -c Release
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "mame-ao ${GITHUB_REF_NAME#v}" \
+            --notes "Linux builds (.NET 10, self-contained, single file)." \
+            artifacts/*

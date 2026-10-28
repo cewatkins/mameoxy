@@ -1,0 +1,542 @@
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Text;
+using System.Linq;
+
+using System.Data.SqlClient;
+using Microsoft.Data.Sqlite;
+
+namespace Spludlow.MameAO
+{
+	public class Database
+	{
+		public static string MakeSQLiteConnectionString(string filename)
+		{
+			return $"Data Source={filename};";	// Mode=ReadWrite;Cache=Shared;Pooling=True;Max Pool Size=8;Journal Mode=WAL;Synchronous=Normal;";
+		}
+
+		public static void DataSet2SQLite(string name, string connectionString, DataSet dataSet)
+		{
+			using (SqliteConnection connection = new SqliteConnection(connectionString))
+			{
+				Console.Write($"Creating SQLite {name} ...");
+				connection.Open();
+				try
+				{
+					foreach (DataTable table in dataSet.Tables)
+					{
+						List<string> columnDefinitions = new List<string>();
+
+						foreach (DataColumn column in table.Columns)
+						{
+							string dataType = "TEXT";
+							if (column.ColumnName.EndsWith("_id") == true)
+							{
+								dataType = columnDefinitions.Count == 0 ? "INTEGER PRIMARY KEY" : "INTEGER";
+							}
+							else
+							{
+								if (column.DataType == typeof(int) || column.DataType == typeof(long))
+									dataType = "INTEGER";
+							}
+							columnDefinitions.Add($"\"{column.ColumnName}\" {dataType}");
+						}
+
+						string tableDefinition = $"CREATE TABLE {table.TableName}({String.Join(",", columnDefinitions.ToArray())});";
+
+						using (SqliteCommand command = new SqliteCommand(tableDefinition, connection))
+						{
+							command.ExecuteNonQuery();
+						}
+					}
+
+					foreach (DataTable table in dataSet.Tables)
+					{
+						Console.Write($"{table.TableName}...");
+
+						List<string> columnNames = new List<string>();
+						List<string> parameterNames = new List<string>();
+						foreach (DataColumn column in table.Columns)
+						{
+							columnNames.Add($"\"{column.ColumnName}\"");
+							parameterNames.Add("@" + column.ColumnName);
+						}
+
+						string commandText = $"INSERT INTO {table.TableName}({String.Join(",", columnNames.ToArray())}) VALUES({String.Join(",", parameterNames.ToArray())});";
+
+						SqliteTransaction transaction = connection.BeginTransaction();
+						try
+						{
+							foreach (DataRow row in table.Rows)
+							{
+								using (SqliteCommand command = new SqliteCommand(commandText, connection, transaction))
+								{
+									foreach (DataColumn column in table.Columns)
+										command.Parameters.AddWithValue("@" + column.ColumnName, row[column]);
+
+									command.ExecuteNonQuery();
+								}
+							}
+
+							transaction.Commit();
+						}
+						catch
+						{
+							transaction.Rollback();
+							throw;
+						}
+					}
+
+					if (name == "mame")
+					{
+						foreach (string commandText in new string[] {
+							"CREATE INDEX idx_machine_name ON machine(name);",
+							"CREATE INDEX idx_machine_description ON machine([description] COLLATE NOCASE);",
+						})
+							using (SqliteCommand command = new SqliteCommand(commandText, connection))
+								command.ExecuteNonQuery();
+					}
+
+					if (name == "softwarelists")
+					{
+						foreach (string commandText in new string[] {
+							"CREATE INDEX idx_software_name ON software([name]);",
+							"CREATE INDEX idx_software_description ON software([description] COLLATE NOCASE);",
+							"CREATE INDEX idx_softwarelist_name ON softwarelist([name]);",
+							"CREATE INDEX idx_softwarelist_description ON softwarelist([description] COLLATE NOCASE);",
+						})
+							using (SqliteCommand command = new SqliteCommand(commandText, connection))
+								command.ExecuteNonQuery();
+					}
+
+					//	TODO: FbNeo indexes
+
+					//	TODO: Pinball indexes
+				}
+				finally
+				{
+					connection.Close();
+				}
+				Console.WriteLine("...done.");
+			}
+		}
+
+		public static void DataSet2MSSQL(DataSet dataSet, string serverConnectionString, string databaseName)
+		{
+			SqlConnection targetConnection = new SqlConnection(serverConnectionString);
+
+			if (DatabaseExists(targetConnection, databaseName) == true)
+				return;
+
+			ExecuteNonQuery(targetConnection, $"CREATE DATABASE[{databaseName}]");
+			ExecuteNonQuery(targetConnection, $"ALTER DATABASE [{databaseName}] SET RECOVERY SIMPLE");
+
+			targetConnection = new SqlConnection(serverConnectionString + $"Initial Catalog='{databaseName}';");
+
+			DataSet2MSSQLTables(dataSet, targetConnection);
+		}
+		public static void DataSet2MSSQLTables(DataSet dataSet, SqlConnection targetConnection)
+		{
+			foreach (DataTable table in dataSet.Tables)
+			{
+				List<string> columnDefs = new List<string>();
+
+				foreach (DataColumn column in table.Columns)
+				{
+					int max = 1;
+					if (column.DataType.Name == "String")
+					{
+						foreach (DataRow row in table.Rows)
+						{
+							if (row.IsNull(column) == false)
+								max = Math.Max(max, ((string)row[column]).Length);
+						}
+					}
+
+					string length = max == -1 || max > 4096 ? "max" : max.ToString();
+
+					switch (column.DataType.Name)
+					{
+						case "String":
+							columnDefs.Add($"[{column.ColumnName}] NVARCHAR({length})");
+							break;
+
+						case "Int32":
+							columnDefs.Add($"[{column.ColumnName}] INT");
+							break;
+
+						case "Int64":
+							columnDefs.Add($"[{column.ColumnName}] BIGINT" + (columnDefs.Count == 0 ? " NOT NULL" : ""));
+							break;
+
+						default:
+							throw new ApplicationException($"SQL Bulk Copy, Unknown datatype {column.DataType.Name}");
+					}
+				}
+
+				string[] pkNames = new string[] { table.Columns[0].ColumnName };
+
+				if (table.PrimaryKey != null && table.PrimaryKey.Length > 0)
+					pkNames = table.PrimaryKey.Select(column => column.ColumnName).ToArray();
+
+				columnDefs.Add($"CONSTRAINT [PK_{table.TableName}] PRIMARY KEY NONCLUSTERED ({String.Join(", ", pkNames.Select(name => $"[{name}]"))})");
+
+				string createText = $"CREATE TABLE [{table.TableName}]({String.Join(", ", columnDefs.ToArray())});";
+
+				Console.WriteLine(createText);
+
+				ExecuteNonQuery(targetConnection, createText);
+
+				BulkInsert(targetConnection, table);
+			}
+		}
+
+		public static int MakeForeignKeys(string serverConnectionString, string databaseName)
+		{
+			using (var connection = new SqlConnection(serverConnectionString + $"Initial Catalog='{databaseName}';"))
+			{
+				DataTable table = ExecuteFill(connection, "SELECT * FROM INFORMATION_SCHEMA.COLUMNS");
+
+				foreach (DataRow row in table.Rows)
+				{
+					string TABLE_NAME = (string)row["TABLE_NAME"];
+					string COLUMN_NAME = (string)row["COLUMN_NAME"];
+					int ORDINAL_POSITION = (int)row["ORDINAL_POSITION"];
+					string DATA_TYPE = (string)row["DATA_TYPE"];
+
+					if (ORDINAL_POSITION > 1 && COLUMN_NAME.EndsWith("_id") && DATA_TYPE == "bigint")
+					{
+						string parentTableName = COLUMN_NAME.Substring(0, COLUMN_NAME.Length - 3);
+
+						string commandText =
+							$"ALTER TABLE [{TABLE_NAME}] ADD CONSTRAINT [FK_{parentTableName}_{TABLE_NAME}] FOREIGN KEY ([{COLUMN_NAME}]) REFERENCES [{parentTableName}] ([{COLUMN_NAME}])";
+
+						Console.WriteLine(commandText);
+						ExecuteNonQuery(connection, commandText);
+
+						commandText = $"CREATE INDEX [IX_{TABLE_NAME}_{COLUMN_NAME}] ON [{TABLE_NAME}] ([{COLUMN_NAME}])";
+
+						Console.WriteLine(commandText);
+						ExecuteNonQuery(connection, commandText);
+					}
+				}
+			}
+
+			return 0;
+		}
+
+		public static bool TableExists(SqliteConnection connection, string tableName)
+		{
+			object obj = ExecuteScalar(connection, $"SELECT name FROM sqlite_master WHERE type='table' AND name='{tableName}'");
+
+			if (obj == null || obj is DBNull)
+				return false;
+
+			return true;
+		}
+		public static string[] TableList(SqliteConnection connection)
+		{
+			List<string> tableNames = new List<string>();
+
+			DataTable table = Database.ExecuteFill(connection, "SELECT name FROM sqlite_master WHERE type = 'table'");
+			foreach (DataRow row in table.Rows)
+			{
+				string tableName = (string)row[0];
+
+				if (tableName.StartsWith("sqlite_") == false)
+					tableNames.Add(tableName);
+			}
+			return tableNames.ToArray();
+		}
+		public static object ExecuteScalar(SqliteConnection connection, string commandText)
+		{
+			connection.Open();
+			try
+			{
+				using (SqliteCommand command = new SqliteCommand(commandText, connection))
+					return command.ExecuteScalar();
+			}
+			finally
+			{
+				connection.Close();
+			}
+		}
+
+		public static int ExecuteNonQuery(string connectionString, string commandText)
+		{
+			using (SqliteConnection connection = new SqliteConnection(connectionString))
+			{
+				connection.Open();
+				try
+				{
+					using (SqliteCommand command = new SqliteCommand(commandText, connection))
+						return command.ExecuteNonQuery();
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+		public static int ExecuteNonQuery(SqliteConnection connection, string commandText)
+		{
+			bool openClose = connection.State == ConnectionState.Closed;
+
+			if (openClose)
+				connection.Open();
+			try
+			{
+				using (SqliteCommand command = new SqliteCommand(commandText, connection))
+					return command.ExecuteNonQuery();
+			}
+			finally
+			{
+				if (openClose)
+					connection.Close();
+			}
+		}
+		public static DataTable ExecuteFill(string connectionString, string commandText)
+		{
+			var table = new DataTable();
+			using (var connection = new SqliteConnection(connectionString))
+				using (var adapter = new SqliteDataAdapter(commandText, connection))
+					adapter.Fill(table);
+			return table;
+		}
+		public static DataTable ExecuteFill(SqliteConnection connection, string commandText)
+		{
+			var table = new DataTable();
+			using (var adapter = new SqliteDataAdapter(commandText, connection))
+				adapter.Fill(table);
+			return table;
+		}
+		public static DataTable ExecuteFill(SqliteCommand command)
+		{
+			var table = new DataTable();
+			using (var adapter = new SqliteDataAdapter(command))
+				adapter.Fill(table);
+			return table;
+		}
+
+		//
+		// MS SQL
+		//
+
+		public static bool DatabaseExists(SqlConnection connection, string databaseName)
+		{
+			object obj = ExecuteScalar(connection, $"SELECT name FROM sys.databases WHERE name = '{databaseName}'");
+
+			if (obj == null || obj is DBNull)
+				return false;
+
+			return true;
+		}
+
+		public static object ExecuteScalar(SqlConnection connection, string commandText)
+		{
+			connection.Open();
+			try
+			{
+				using (SqlCommand command = new SqlCommand(commandText, connection))
+					return command.ExecuteScalar();
+			}
+			finally
+			{
+				connection.Close();
+			}
+
+		}
+		public static object ExecuteScalar(SqlCommand command)
+		{
+			command.Connection.Open();
+			try
+			{
+				return command.ExecuteScalar();
+			}
+			finally
+			{
+				command.Connection.Close();
+			}
+
+		}
+
+		public static int ExecuteNonQuery(SqlConnection connection, string commandText)
+		{
+			connection.Open();
+			try
+			{
+				using (SqlCommand command = new SqlCommand(commandText, connection))
+				{
+					command.CommandTimeout = 15 * 60;
+					return command.ExecuteNonQuery();
+				}
+			}
+			finally
+			{
+				connection.Close();
+			}
+		}
+		public static DataTable ExecuteFill(SqlConnection connection, string commandText)
+		{
+			DataTable table = new DataTable();
+			using (SqlDataAdapter adapter = new SqlDataAdapter(commandText, connection))
+				adapter.Fill(table);
+			return table;
+		}
+
+		public static void BulkInsert(SqlConnection connection, DataTable table)
+		{
+			Console.Write($"Bulk Insert: {table} ({table.Rows.Count}) ...");
+
+			using (SqlBulkCopy sqlBulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.TableLock, null))
+			{
+				sqlBulkCopy.DestinationTableName = table.TableName;
+				sqlBulkCopy.BulkCopyTimeout = 1 * 60 * 60;
+				sqlBulkCopy.BatchSize = 16 * 1024;
+				sqlBulkCopy.NotifyAfter = table.Rows.Count / 100;
+				sqlBulkCopy.SqlRowsCopied += (sender, e) =>
+				{
+					long percent = e.RowsCopied * 100 / table.Rows.Count;
+					Console.Write($"{percent}.");
+				};
+				connection.Open();
+				try
+				{
+					sqlBulkCopy.WriteToServer(table);
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			Console.WriteLine("...done");
+		}
+
+		public static string[] TableList(SqlConnection connection)
+		{
+			List<string> result = new List<string>();
+
+			DataTable table = ExecuteFill(connection,
+				"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME");
+
+			foreach (DataRow row in table.Rows)
+				result.Add((string)row["TABLE_NAME"]);
+
+			return result.ToArray();
+		}
+
+		public static bool TableExists(SqlConnection connection, string tableName)
+		{
+			using (SqlCommand command = new SqlCommand("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE (TABLE_TYPE='BASE TABLE' AND TABLE_NAME=@TABLE_NAME)", connection))
+			{
+				command.Parameters.AddWithValue("@TABLE_NAME", tableName);
+				object obj = ExecuteScalar(command);
+
+				if (obj == null || obj is DBNull)
+					return false;
+
+				return true;
+			}
+		}
+
+		public static bool IndexExists(SqlConnection connection, string tableName, string indexName)
+		{
+			using (SqlCommand command = new SqlCommand(@"
+				SELECT 1
+				FROM sys.indexes
+				WHERE name = @INDEX_NAME
+				AND object_id = OBJECT_ID(@TABLE_NAME)
+				", connection))
+			{
+				command.Parameters.AddWithValue("@INDEX_NAME", indexName);
+				command.Parameters.AddWithValue("@TABLE_NAME", tableName);
+
+				object obj = ExecuteScalar(command);
+
+				return !(obj == null || obj is DBNull);
+			}
+		}
+
+		public static bool FullTextColumnExists(SqlConnection connection, string tableName, string columnName)
+		{
+			using (SqlCommand command = new SqlCommand(@"
+				SELECT 1
+				FROM sys.fulltext_index_columns
+				INNER JOIN sys.objects 
+					ON sys.fulltext_index_columns.object_id = sys.objects.object_id
+				INNER JOIN sys.columns 
+					ON sys.fulltext_index_columns.object_id = sys.columns.object_id 
+					AND sys.fulltext_index_columns.column_id = sys.columns.column_id
+				WHERE sys.objects.object_id = OBJECT_ID(@TABLE_NAME)
+					AND sys.columns.name = @COLUMN_NAME
+				", connection))
+			{
+				command.Parameters.AddWithValue("@TABLE_NAME", tableName);
+				command.Parameters.AddWithValue("@COLUMN_NAME", columnName);
+
+				object obj = ExecuteScalar(command);
+
+				return !(obj == null || obj is DBNull);
+			}
+		}
+
+		public static void ConsoleQuery(ICore core, string database, string commandText)
+		{
+			using (SqliteConnection connection = new SqliteConnection(database == "m" ? core.ConnectionStrings[0] : core.ConnectionStrings[1]))
+			{
+				try
+				{
+					if (commandText.ToUpper().StartsWith("SELECT") == true)
+					{
+						DataTable table = ExecuteFill(connection, commandText);
+
+						StringBuilder text = new StringBuilder();
+
+						foreach (DataColumn column in table.Columns)
+						{
+							if (column.Ordinal > 0)
+								text.Append('\t');
+							text.Append(column.ColumnName);
+						}
+						Console.WriteLine(text.ToString());
+
+						text.Length = 0;
+						foreach (DataColumn column in table.Columns)
+						{
+							if (column.Ordinal > 0)
+								text.Append('\t');
+							text.Append(new String('=', column.ColumnName.Length));
+						}
+						Console.WriteLine(text.ToString());
+
+						foreach (DataRow row in table.Rows)
+						{
+							text.Length = 0;
+							foreach (DataColumn column in table.Columns)
+							{
+								if (column.Ordinal > 0)
+									text.Append('\t');
+								if (row.IsNull(column) == false)
+									text.Append(Convert.ToString(row[column]));
+							}
+							Console.WriteLine(text.ToString());
+						}
+					}
+					else
+					{
+						ExecuteNonQuery(connection, commandText);
+					}
+				}
+				catch (SqliteException e)
+				{
+					Console.WriteLine(e.Message);
+				}
+
+				Console.WriteLine();
+			}
+		}
+
+	}
+}

@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MameAo.Core/MameAo.Core.csproj" />
+    <Project Path="src/MameAo.Bt/MameAo.Bt.csproj" />
+    <Project Path="src/MameAo.Platform.Linux/MameAo.Platform.Linux.csproj" />
+    <Project Path="src/MameAo.Cli/MameAo.Cli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MameAo.Tests/MameAo.Tests.csproj" />
+  </Folder>
+</Solution>

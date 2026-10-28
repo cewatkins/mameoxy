@@ -1,0 +1,2021 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width">
+
+	<link rel="stylesheet" type="text/css" href="/styles.css" />
+
+	<script type="text/javascript">
+
+		const _rootMenu =
+			[{
+				text: 'MAME-AO',
+				title: 'MAME-AO',
+				href: '/',
+				menu: [
+					{
+						text: 'Machines',
+						title: 'Start Machines',
+						href: '/machines',
+					},
+					{
+						text: 'Genres',
+						title: 'Machines by Genre',
+						href: '/genres',
+					},
+					{
+						text: 'Saved State',
+						title: 'View saved state & Previous MAME versions',
+						href: '/saved',
+					},
+					{
+						text: 'Reporting',
+						title: 'Information Reporting',
+						href: '/reports',
+						menu: [
+							{
+								text: 'Run Reports',
+								title: 'Run Reports',
+								href: '/reports/run',
+							},
+							{
+								text: 'View Reports',
+								title: 'View Veports',
+								href: '/reports/view',
+							},
+							{
+								text: 'SQL Query',
+								title: 'SQL Query',
+								href: '/reports/sql',
+							},
+						],
+					},
+					{
+						text: 'Import',
+						title: 'Import into MAME-AO',
+						href: '/import',
+					},
+					{
+						text: 'Export',
+						title: 'Export from MAME-AO',
+						href: '/export',
+					},
+					{
+						text: 'Tools',
+						title: 'Tools',
+						href: '/tools',
+					},
+					{
+						text: 'Settings',
+						title: 'Settings - User Preferences',
+						href: '/settings',
+					},
+					{
+						text: 'BitTorrent',
+						title: 'BitTorrent Client Information',
+						href: '/bittorrent',
+					},
+					{
+						text: 'About',
+						title: 'About & System Information',
+						href: '/about',
+					},
+				],
+			}];
+
+		//
+		// Main
+		//
+
+		let _baseUrl;
+		let _parameters;
+		let _path;
+		let _pathParts;
+		let _info;
+		let _currentMenu;
+		let _updateAvailable = false;
+		let _inTick = false;
+
+		const main = async () => {
+
+			try {
+
+				getRequestInfo();
+
+				await mainWork();
+
+				await tick();
+				setInterval(tick, 2000);
+
+			} catch (error) {
+
+				const div = document.getElementById('error');
+
+				const html = `<h2>MAME-AO UI Error : ${error.name}</h2>` +
+					'<p>If you want to submit an error report please copy and paste the error text from here. Maybe include a screen shot.</p>' +
+					'<p>Copy (Ctrl+C) -> notepad -> paste (Ctrl+V).</p>' +
+					'<p>Report issues here <a href="https://github.com/sam-ludlow/mame-ao/issues" target="_blank" >https://github.com/sam-ludlow/mame-ao/issues</a></p>' +
+					'<hr />' +
+					`<p>${error.stack}</p>` +
+					'<hr />';
+
+				div.innerHTML = html;
+				div.style = 'background-color: pink;';
+
+				throw error;
+			}
+		}
+
+		//
+		// Status tick
+		//
+
+		const tick = async () => {
+
+			if (_inTick === true)
+				return;
+
+			_inTick = true;
+
+			let status;
+
+			try {
+				status = await fetchJson('/api/status');
+			}
+			catch (e) {
+				alert(`Problem connecting to MAME-AO server.\n\nHave you closed the console?\n\nStart MAME-AO again or close this window.\n\nError: ${e.message}`);
+			}
+
+			try {
+
+				document.body.className = status.busy === true ? 'busy' : '';
+
+				const topRow = document.getElementById('nav').children[0];
+
+				let statusElement = [...topRow.children].find(element => element.id === 'status');
+
+				if (status.busy === false && statusElement)
+					statusElement.remove();
+
+				if (status.busy == true) {
+					if (!statusElement) {
+						statusElement = document.createElement('a');
+						statusElement.id = 'status';
+						topRow.appendChild(statusElement);
+					}
+
+					statusElement.style.textAlign = 'center';
+
+					let message = `Running Command: "${status.command}"`;
+
+					if (status.bytesTotal > 0) {
+						const percent = ((100 / status.bytesTotal) * status.bytesCurrent).toFixed(2);
+						message += `, Progress: ${status.bytesCurrent} of ${status.bytesTotal} (${percent}%)`;
+
+						statusElement.style.color = percent < 30 ? '#ffffff' : '#000000';
+
+						let red = (percent >= 50) ? Math.round((50 - (percent - 50)) * 5.1) : 255;
+						let green = (percent < 50) ? Math.round(percent * 5.1) : 255;
+
+						statusElement.style.backgroundColor = `rgb(${red}, ${green}, 0)`;
+					} else {
+						statusElement.style.backgroundColor = '#ffff00';
+					}
+
+					statusElement.innerHTML = message;
+				}
+			}
+			finally {
+				_inTick = false;
+			}
+		}
+
+		const mainWork = async () => {
+
+			//
+			// Info & update check
+			//
+
+			_info = await fetchJson('/api/info');
+
+			if (_info.version_name_current !== _info.version_name_available) {
+				_rootMenu.push({
+					text: `Update Available ${_info.version_name_current} => ${_info.version_name_available}`,
+					title: `Update ${_info.version_name_current} => ${_info.version_name_available}`,
+					href: '/update',
+					style: 'background-color: #ffa500;',
+				});
+			}
+
+
+			//
+			// load machines menu
+			//
+			if (_pathParts.includes('/machines')) {
+				const dataProfiles = await fetchJson('/api/profiles');
+
+				_rootMenu[0].menu[0].menu = dataProfiles.results.map((profile) => {
+					return {
+						text: profile.text,
+						title: profile.description,
+						href: `/machines/${profile.key}`,
+					};
+				});
+			}
+
+			//
+			// load software menu
+			//
+			let machineData;
+
+			if (_pathParts.includes('/machines') && _pathParts.length >= 4) {
+
+				let current;
+				_rootMenu[0].menu[0].menu.forEach((item) => {
+					if (_pathParts[2] === item.href)
+						current = item;
+				});
+
+				if (current === undefined)
+					throw new Error('current machine menu not found');
+
+				let parts = _pathParts[2].split('/');
+				const profileName = parts[parts.length - 1];
+
+				parts = _pathParts[3].split('/');
+				const machineName = parts[parts.length - 1];
+
+				machineData = await fetchJson(`/api/machine?name=${machineName}`);
+
+				current.menu = [{
+					text: `${machineData.name} &bull; ${machineData.description}`,
+					title: machineData.description,
+					href: `/machines/${profileName}/${machineName}`,
+				}];
+
+				current.menu[0].menu = machineData.softwarelists.map((list) => {
+					return {
+						text: list.description,
+						title: list.description,
+						href: `/machines/${profileName}/${machineName}/${list.name}`,
+					};
+				});
+
+				current.menu[0].menu.push({
+					text: 'Favorites',
+					title: 'Favorites',
+					href: `/machines/${profileName}/${machineName}/@fav`,
+				});
+
+			}
+
+			//
+			// genre menu
+			//
+
+			if (_info.genre_version === '') {
+				_rootMenu[0].menu.splice(1, 1);
+			} else {
+				if (_pathParts.includes('/genres') && _pathParts.length >= 3) {
+
+					let parts = _pathParts[2].split('/');
+					const group_name_enc = parts[parts.length - 1];
+					const group_name = decodeURIComponent(group_name_enc);
+
+					_rootMenu[0].menu[1].menu = [{
+						text: group_name,
+						title: group_name,
+						href: `/genres/${group_name_enc}`,
+					}];
+
+					if (_pathParts.length >= 4) {
+
+						parts = _pathParts[3].split('/');
+						const genre_name_enc = parts[parts.length - 1];
+						const genre_name = decodeURIComponent(genre_name_enc);
+
+						_rootMenu[0].menu[1].menu[0].menu = [{
+							text: genre_name,
+							title: genre_name,
+							href: `/genres/${group_name_enc}/${genre_name_enc}`,
+						}];
+					}
+				}
+			}
+
+			displayMenu();
+
+			//
+			// Route
+			//
+
+			if (_pathParts.includes('/machines') && _pathParts.length === 3) {
+				await machines();
+				return;
+			}
+
+			if (_pathParts.includes('/machines') && _pathParts.length === 5) {
+				await machine(machineData);
+				return;
+			}
+
+			if (_pathParts.includes('/genres') && _pathParts.length === 3) {
+				await genresGroup();
+				return;
+			}
+
+			if (_pathParts.includes('/genres') && _pathParts.length === 4) {
+				await genreMachines();
+				return;
+			}
+
+			const routeFunction = {
+				'/update': update,
+				'/genres': genres,
+				'/saved': saved,
+				'/reports/run': runReports,
+				'/reports/view': viewReports,
+				'/reports/sql': sqlReports,
+				'/import': importFiles,
+				'/export': exportFiles,
+				'/tools': tools,
+				'/settings': settings,
+				'/bittorrent': bittorrent,
+				'/about': about,
+			}[_path];
+
+			if (routeFunction !== undefined) {
+				await routeFunction();
+			} else {
+				// Handle going back to dead pages
+				window.addEventListener('pageshow', () => {
+					if (event.persisted)
+						history.back();
+				});
+			}
+		}
+
+		//
+		// Settings
+		//
+		const settings = async () => {
+
+			const canvas = getCanvas();
+
+			const data = await fetchJson('/api/settings');
+
+			let html = '<table><tr><th>Setting</th><th>Value</th><th>Description</th></tr>';
+
+			Object.keys(data.available_options).forEach((key) => {
+
+				let select = `<select id="settings_${key}" onchange="runCommand('.set ${key} ' + this.value)">`;
+				data.available_options[key].forEach((option) => {
+					select += `<option value="${option}">${option}</option>`;
+				});
+				select += '</select>';
+
+				html += `<tr><td>${key}</td><td>${select}</td><td>${data.option_descriptions[key]}</td></tr>`;
+			});
+			html += '</table>';
+
+			let div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+
+			Object.keys(data.available_options).forEach((key) => {
+				document.getElementById(`settings_${key}`).value = data.options[key];
+			});
+		}
+
+		//
+		// BitTorrent
+		//
+		const bittorrent = async () => {
+
+			const canvas = getCanvas();
+
+			const refreshLink = '<p><a href="javascript:window.location.href=window.location.href">Refresh this page to see changes</a></p>';
+
+			let div;
+			let table;
+			let columnDefs;
+
+			if (_info.bit_torrent_enabled !== true) {
+
+				div = document.createElement('div');
+				div.innerHTML = '<h2>BitTorrent Currently Disabled</h2>' +
+					'<p>Click button to enable immediately. You will have to Allow in Windows Firewall when the dialog apears.</p>' +
+					'<button type="submit" onclick="runCommand(\'.bt\'); return false;">Enable BitTorrent</button>' +
+					refreshLink;
+				canvas.appendChild(div);
+				return;
+			}
+
+
+			div = document.createElement('div');
+			div.innerHTML = 'Connecting to DOME-BT ...';
+			canvas.appendChild(div);
+
+			let btInfo;
+			try {
+				btInfo = await fetchJson('/api/info', _info.bit_torrent_url);
+				div.innerHTML = '';
+			}
+			catch (e) {
+				div.innerHTML = `<h2>Error connecting to DOME-BT</h2><p>Ensure the DOME-BT process is running you can use the command ".bt" or click the button.</p><p>Error: ${e.message}</p>` +
+					'<button type="submit" onclick="runCommand(\'.bt\'); return false;">Start BitTorrent</button>' +
+					refreshLink;
+				return;
+			}
+
+			// BitTorrent Client Information
+
+			div = document.createElement('div');
+			div.style = 'width:100%;';
+            div.innerHTML = '<h2>BitTorrent Client Information</h2><table style="width:100%;">' +
+				'<tr><th>Version</th><th>Start Time</th><th>Time Now</th><th>Running for</th><th>Port</th></tr>' +
+				`<tr><td>DOME-BT ${btInfo.version}</td><td>${btInfo.start_time}</td><td>${btInfo.time_now}</td><td>${btInfo.run_time_text}</td><td>${btInfo.port_number}</td></tr>` +
+				'</table>';
+			canvas.appendChild(div);
+
+			div = document.createElement('div');
+			div.style = 'width:100%;';
+			div.innerHTML = '<table style="width:100%;">' +
+				'<tr><th>Open Connections</th><th>Download Rate</th><th>Upload Rate</th></tr>' +
+				`<tr><td>${btInfo.open_connections}</td><td>${btInfo.total_download_rate_text}/s</td><td>${btInfo.total_upload_rate_text}/s</td></tr>` +
+				'</table>';
+			canvas.appendChild(div);
+
+			div = document.createElement('div');
+			div.style = 'width:100%;';
+			div.innerHTML = '<table style="width:100%;">' +
+				'<tr><th>Download Total</th><th>Upload Total</th></tr>' +
+				`<tr><td>${btInfo.total_bytes_received_text}</td><td>${btInfo.total_bytes_sent_text}</td></tr>` +
+				'</table>';
+			canvas.appendChild(div);
+
+			// BitTorrents
+
+			div = document.createElement('div');
+			div.style = 'width:100%;';
+			div.innerHTML = '<hr /><h2>BitTorrents</h2>';
+			canvas.appendChild(div);
+
+			columnDefs = [
+				{ heading: 'Name', columnName: 'name' },
+				{ heading: 'Core', columnName: 'core' },
+				{ heading: 'Type', columnName: 'type' },
+				{ heading: 'Version', columnName: 'version' },
+				{ heading: 'State', columnName: 'state' },
+				{ heading: 'Files', columnName: 'file_count' },
+				{ heading: 'Connections', columnName: 'open_connections' },
+				{ heading: 'Available', columnName: 'peers_available' },
+				{ heading: 'Leechs', columnName: 'peers_leechs' },
+				{ heading: 'Seeds', columnName: 'peers_seeds' },
+				{ heading: 'Downloaded', columnName: 'bytes_received_text' },
+				{ heading: 'Uploaded', columnName: 'bytes_sent_text' },
+			];
+
+			table = document.createElement('table');
+			table.style = 'width:100%;';
+
+			buildTable(columnDefs, btInfo.torrents, table, (columnDef, result, resultIndex, row, cell) => {
+
+				const value = result[columnDef.columnName];
+
+				if (value === undefined)
+					return;
+
+				switch (columnDef.columnName) {
+
+					case 'name':
+						cell.innerHTML = `<a href="${result.magnet}" target="_blank">${value}</a>`;
+						break;
+
+					case 'state':
+						cell.innerHTML = `<a href="${_info.bit_torrent_url}/api/files?hash=${result.hash}&priority=Highest" target="_blank">${value}</a>`;
+						break;
+
+					case 'file_count':
+						cell.innerHTML = `<a href="${_info.bit_torrent_url}/api/files?hash=${result.hash}" target="_blank">${value}</a>`;
+						break;
+
+					default:
+						cell.innerHTML = value;
+						break;
+				}
+			});
+			canvas.appendChild(table);
+
+			// Port Mappings
+
+			div = document.createElement('div');
+			div.innerHTML = '<hr /><h2>Port Mappings</h2>';
+			canvas.appendChild(div);
+
+			columnDefs = [
+				{ heading: 'Name', columnName: 'name' },
+				{ heading: 'Mappings', columnName: 'mappings' },
+			];
+
+			table = document.createElement('table');
+
+			buildTable(columnDefs, btInfo.port_mappings, table, (columnDef, result, resultIndex, row, cell) => {
+
+				const value = result[columnDef.columnName];
+
+				if (value === undefined)
+					return;
+
+				switch (columnDef.columnName) {
+
+					case 'mappings':
+						cell.innerHTML = value.map(item => `${item.protocol}:${item.public_port}`).join(', ');
+						break;
+
+					default:
+						cell.innerHTML = value;
+						break;
+				}
+			});
+			canvas.appendChild(table);
+
+			// BitTorrent Client Details
+
+			div = document.createElement('div');
+			div.innerHTML = '<hr /><h2>BitTorrent Client Details</h2>';
+			canvas.appendChild(div);
+
+			const infoData = [];
+
+			Object.keys(btInfo).forEach((key) => {
+
+				if (Array.isArray(btInfo[key]) === true)
+					return;
+
+				infoData.push({ key: key, value: btInfo[key] });
+			});
+
+			table = document.createElement('table');
+
+			columnDefs = [
+				{ heading: 'Key', columnName: 'key' },
+				{ heading: 'Value', columnName: 'value' },
+			];
+
+			buildTable(columnDefs, infoData, table, (columnDef, result, resultIndex, row, cell) => {
+
+				const value = result[columnDef.columnName];
+
+				if (value === undefined)
+					return;
+
+				cell.innerHTML = value;
+			});
+
+			canvas.appendChild(table);
+
+			// Restart & Stop
+
+			div = document.createElement('div');
+			div.innerHTML = '<hr /><h2>Restart & Stop BitTorrent</h2>' +
+				'<p>Cleanly shutdown or restart BitTorrent.</p>' +
+				'<button type="submit" onclick="runCommand(\'.btr\'); return false;">Restart BitTorrent</button>' +
+				'<button type="submit" onclick="runCommand(\'.bts\'); return false;">Stop BitTorrent</button>' +
+				refreshLink;
+			canvas.appendChild(div);
+
+			// Disable
+
+			div = document.createElement('div');
+			div.innerHTML = '<hr /><h2>Disable BitTorrent</h2>' +
+				'<p>Click button to disable & remove BitTorrent.</p>' +
+				'<p>If you want to use archive.org for downloading assets use the command ".creds" to enter your credentials if you have not already.</p>' +
+				'<button type="submit" onclick="runCommand(\'.btx\'); return false;">Disable BitTorrent</button>' +
+				refreshLink;
+			canvas.appendChild(div);
+		}
+
+		//
+		// About
+		//
+		const about = async () => {
+
+			const canvas = getCanvas();
+
+			let html = '';
+
+			// Links
+			html += `<h2>Further Info Links</h2><table><tr><th>Description</th><th>URL</th></tr>`;
+
+			html += `<tr><td>What's New in the latest MAME release</td><td><a href="${_baseUrl}/api/what" target="_blank">${_baseUrl}/api/what</a></td></tr>`;
+			html += `<tr><td>MAME Official Docs</td><td><a href="https://docs.mamedev.org/" target="_blank">https://docs.mamedev.org/</a></td></tr>`;
+			html += `<tr><td>MAME-AO README</td><td><a href="https://github.com/sam-ludlow/mame-ao" target="_blank">https://github.com/sam-ludlow/mame-ao</a></td></tr>`;
+			html += `<tr><td>Spludlow Data Web</td><td><a href="https://data.spludlow.co.uk/" target="_blank">https://data.spludlow.co.uk/</a></td></tr>`;
+			html += `<tr><td>MAME-AO API Information</td><td><a href="${_baseUrl}/api/info" target="_blank">${_baseUrl}/api/info</a></td></tr>`;
+
+			if (_info.bit_torrent_enabled === true)
+				html += `<tr><td>DOME-BT API Information</td><td><a href="${_info.bit_torrent_url}/api/info" target="_blank">${_info.bit_torrent_url}/api/info</a></td></tr>`;
+
+			if (_info.linking_enabled !== true)
+				html += '<tr><td>WARNING Symbolic Links are not enabled, you can save disk space, view instructions on enabling.</td><td><a href="https://github.com/sam-ludlow/mame-ao?tab=readme-ov-file#symbolic-links---save-disk-space" target="_blank">https://github.com/sam-ludlow/mame-ao?tab=readme-ov-file#symbolic-links---save-disk-space</a></td></tr>';
+
+			html += '</table><hr />';
+
+			// Cores
+			html += `<h2>Emulator Cores</h2><table><tr><th>Name</th><th>Status</th></tr><p>Must use BitTorrent for non MAME.</p>`;
+
+			_info.cores.forEach((core_name) => {
+                let coreStatus = core_name === _info.core_name ? `Currently running version: ${_info.core_version}` : `<button type="submit" onclick="runCommand('.core ${core_name}'); return false;">Enable ${core_name}</button>`;
+				html += `<tr><td>${core_name}</td><td>${coreStatus}</td></tr>`;
+			});
+
+			html += '</table>';
+			html += '<p><a href="javascript:window.location.href=window.location.href">Refresh this page to see changes</a></p>';
+
+			html += '<hr /><h2>System Information</h2>';
+
+			let div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+
+			// System Information
+			const infoData = [];
+
+			Object.keys(_info).forEach((key) => {
+
+				if (key === 'latest' || key === 'sources' || key === 'items' || key === 'repos')
+					return;
+
+				infoData.push({ key: key, value: _info[key] });
+			});
+
+			let table = document.createElement('table');
+
+			let columnDefs = [
+				{ heading: 'Key', columnName: 'key' },
+				{ heading: 'Value', columnName: 'value' },
+			];
+
+			buildTable(columnDefs, infoData, table, (columnDef, result, resultIndex, row, cell) => {
+
+				const value = result[columnDef.columnName];
+
+				if (value === undefined)
+					return;
+
+				cell.innerHTML = value;
+			});
+
+			canvas.appendChild(table);
+
+			// Repos
+
+			div = document.createElement('div');
+			div.innerHTML = '<hr /><h2>GitHub.com Repos</h2>';
+			canvas.appendChild(div);
+
+			columnDefs = [
+				{ heading: 'Key', columnName: 'key' },
+				{ heading: 'User Name', columnName: 'user_name' },
+				{ heading: 'Repo Name', columnName: 'repo_name' },
+				{ heading: 'Latest (tag_name)', columnName: 'tag_name' },
+				{ heading: 'Published', columnName: 'published_at' },
+				{ heading: 'Details URL', columnName: 'url_details' },
+				{ heading: 'Metadata URL', columnName: 'url_api' },
+			];
+
+			table = document.createElement('table');
+
+			buildTable(columnDefs, _info.repos, table, (columnDef, result, resultIndex, row, cell) => {
+
+				const value = result[columnDef.columnName];
+
+				if (value === undefined)
+					return;
+
+				cell.innerHTML = value;
+
+				switch (columnDef.columnName) {
+
+					case 'url_details':
+					case 'url_api':
+						cell.innerHTML = `<a href="${value}" target="_blank">${value}</a>`;
+						break;
+				}
+			});
+
+			canvas.appendChild(table);
+
+			// Items
+
+			div = document.createElement('div');
+			div.innerHTML = '<hr /><h2>Archive.org Items</h2>';
+			canvas.appendChild(div);
+
+			columnDefs = [
+				{ heading: 'Key', columnName: 'key' },
+				{ heading: 'Type', columnName: 'type' },
+				{ heading: 'Tag', columnName: 'tag' },
+				{ heading: 'Status', columnName: 'status' },
+				{ heading: 'Title', columnName: 'title' },
+				{ heading: 'File Count', columnName: 'file_count' },
+				{ heading: 'Last Updated', columnName: 'item_last_updated' },
+				{ heading: 'Details URL', columnName: 'url_details' },
+				{ heading: 'Metadata URL', columnName: 'url_metadata' },
+				{ heading: 'Download URL', columnName: 'url_download' },
+				{ heading: 'Sub Directory', columnName: 'sub_directory' },
+			];
+
+			table = document.createElement('table');
+
+			buildTable(columnDefs, _info.items, table, (columnDef, result, resultIndex, row, cell) => {
+
+				const value = result[columnDef.columnName];
+
+				if (value === undefined)
+					return;
+
+				cell.innerHTML = value;
+
+				switch (columnDef.columnName) {
+
+					case 'url_details':
+					case 'url_metadata':
+					case 'url_download':
+						cell.innerHTML = `<a href="${value}" target="_blank">${value}</a>`;
+						break;
+				}
+			});
+
+			canvas.appendChild(table);
+
+			// End Points
+
+			const data = await fetchJson('/api/end_points');
+
+			div = document.createElement('div');
+			div.innerHTML = '<hr /><h2>Endpoint Locations</h2>';
+			canvas.appendChild(div);
+
+			columnDefs = [
+				{ heading: 'Name', columnName: 'name' },
+				{ heading: 'Location', columnName: 'location' },
+			];
+
+			table = document.createElement('table');
+
+			buildTable(columnDefs, data.results, table, (columnDef, result, resultIndex, row, cell) => {
+
+				const value = result[columnDef.columnName];
+
+				cell.innerHTML = value;
+
+				switch (columnDef.columnName) {
+
+					case 'location':
+						cell.innerHTML = `<a href="${value}" target="_blank">${value}</a>`;
+						break;
+				}
+			});
+
+			canvas.appendChild(table);
+		}
+
+		//
+		// Update
+		//
+		const update = async () => {
+
+			const canvas = getCanvas();
+
+			const html = `<p>New MAME-AO update avaialable ${_info.version_name_current} => ${_info.version_name_available}</p>` +
+				`<a href="${_baseUrl}/api/update">Click here to update immediately.</a>`;
+
+			const div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+		}
+
+		//
+		// Tools
+		//
+		const tools = async () => {
+			const canvas = getCanvas();
+
+			let html;
+			let div;
+
+			// Snaps & SVG
+			html = '';
+			html += '<h2>Snaps Collection & Convert PNG into SVG</h2>';
+			html += '<p>Copy and paste the directory path or filename here.</p>';
+			html += '<input id="directory" type="text" value="" style="width:480px;" />';
+			html += '<p>Collect and Move Snaps (F12 pictures) to directory.</p>';
+			html += '<button type="submit" onclick="runCommand(\'.snap \' + directory.value); return false;">Collect Snaps</button>';
+			html += '<p>Convert bitmaps to SVG, single filename or directory for all files</p>';
+			html += '<button type="submit" onclick="runCommand(\'.svg \' + directory.value); return false;">Convert to SVG</button>';
+
+			div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+
+			document.getElementById('directory').focus();
+
+			// MS Access
+			html = '<hr />';
+			html += '<h2>Create MS Access databases</h2>';
+			html += '<p>Requires <a href="https://github.com/sam-ludlow/access-linker/releases" target="_blank">access-linker.exe</a> in the MAME-AO directory, and other dependencies (ODBC & OLE DB drivers) see the <a href="https://github.com/sam-ludlow/access-linker" target="_blank">access-linker README</a>.</p>';
+			html += '<p>MS Access databases from complete MAME XML. Usfull for looking at the MAME data.</p>';
+			html += '<button type="submit" onclick="runCommand(\'.accdbxml\'); return false;">Create from MAME XML</button>';
+			html += '<p>MS Access databases linked to MAME-AO SQLite. Usfull for debugging MAME-AO.</p>';
+			html += '<button type="submit" onclick="runCommand(\'.accdb\'); return false;">Link to MAME-AO SQLite</button>';
+
+			div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+
+			// Test
+			const dataProfiles = await fetchJson('/api/profiles');
+
+			html = '<hr />';
+			html += '<h2>Run MAME-AO asset place tests</h2>';
+			html += '<p>Randomly place assets and test with MAME verifyroms, Test will stop with a non zero exit code from MAME.</p>';
+			html += '<p><select id="testProfile">' + dataProfiles.results.map((profile) => `<option value="${profile.key}">${profile.text}</option>`).join() + '</select></p>';
+			html += '<p><select id="testCount">' + [1, 8, 16, 32, 64, 128, 256, 512, 1024, 4096, 0].map((count) => `<option value="${count}">${count}</option>`).join() + '</select></p>';
+			html += '<button type="submit" onclick="runCommand(\'.test \' + testProfile.value + \' \' + testCount.value); return false;">Run Tests</button>';
+
+			div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+
+			// Store
+			html = '<hr />';
+			html += '<h2>Store Validation</h2>';
+			html += '<p>WARNING: These can take a while if you have a lot of stuff.</p>';
+			html += '<p>Validate the ROM Hash Store, each file will be SHA1 hashed and compared to the filename.</p>';
+			html += `<button type="submit" onclick="runCommand(\'.valid rom\'); return false;">Validate ROM</button>`;
+			html += '<p>Validate the DISK Hash Store, each file will have the SHA1 verified with chdman.exe and compared to the filename.</p>';
+			html += '<button type="submit" onclick="runCommand(\'.valid disk\'); return false;">Validate DISK</button>';
+
+			div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+		}
+
+		//
+		// Import
+		//
+		const importFiles = async () => {
+
+			const canvas = getCanvas();
+
+			const softwarelistData = await fetchJson('/api/softwarelists');
+
+			let html = '';
+			html += '<h2>Import from Directory</h2>'
+			html += '<p>Copy and paste the directory path to import from here. Anything required in the current core will be imported to the store.</p>';
+			html += '<p><input id="importDirectory" type="text" value="" style="width:480px;" /></p>';
+			html += '<button type="submit" onclick="runCommand(\'.import \' + importDirectory.value); return false;">Import from Directory</button>';
+
+			html += `<hr /><h2>Fetch Complete Software List</h2>`;
+			html += '<p>Fetch a comlpete software list and place ready to use from within MAME.</p>';
+			html += '<p><select id="softwareListPlace">' + softwarelistData.results.map((list) => `<option value="${list.name}">${list.description}</option>`).join() + '</select></p>';
+			html += '<button type="submit" onclick="runCommand(\'.software \' + softwareListPlace.value); return false;">Fetch & Place</button>';
+
+			html += `<hr /><h2>Fetch Everything</h2>`;
+			html += '<p>If you are maintaining full sets use fetch to top-up the hash store. Nothing will be placed only stored.</p>';
+			html += '<p><select id="fetchType"><option value="MR">Machine ROM</option><option value="MD">Machine DISK</option><option value="SR">Software ROM</option><option value="SD">Software DISK</option><option value="*">Everything</option></select></p>';
+			html += '<button type="submit" onclick="runCommand(\'.fetch \' + fetchType.value); return false;">Fetch All</button>';
+
+			const div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+
+			document.getElementById('importDirectory').focus();
+		}
+
+		//
+		// Export
+		//
+		const exportFiles = async () => {
+
+			const canvas = getCanvas();
+
+			const softwarelistData = await fetchJson('/api/softwarelists');
+
+			let html = '';
+
+			html += '<h2>Target Directory</h2>';
+			html += '<p>Copy and paste the directory path to here.</p>';
+			html += '<input id="targetDirectory" type="text" value="" style="width:480px;" />';
+
+			html += '<hr /><h2>Standard MAME format (split-set)</h2>';
+			html += '<p>Export everything in current core thats in the store. Machine ROMs will be in split-set format (separate parent ZIP & child diff ZIPs).</p>';
+			html += '<p><select id="exportType"><option value="*">Everything</option><option value="MR">Machine ROM</option><option value="MD">Machine DISK</option><option value="SR">Software ROM</option><option value="SD">Software DISK</option></select></p>';
+			html += '<button type="submit" onclick="runCommand(\'.export \' + exportType.value + \' \' + targetDirectory.value); return false;">Start</button>';
+
+			html += '<hr /><h2>Fetch complete software lists with friendly names</h2>';
+			html += '<p>Complete software list will be downloaded and exported to directory with friendly filenames.</p>';
+			html += '<p><select id="selectList">' + softwarelistData.results.map((list) => `<option value="${list.name}">${list.description}</option>`).join() + '</select></p>';
+			html += '<p><input type="checkbox" id="inputUseDirs">Use directories for each software</input></p>';
+			html += '<button type="submit" onclick="runCommand(\'.softname\' + (inputUseDirs.checked ? \'d\' : \'\') + \' \' + selectList.value + \' \' + targetDirectory.value); return false;">Start</button>';
+
+			const div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+			
+			document.getElementById('targetDirectory').focus();
+		}
+
+		//
+		// Saved state
+		//
+		const saved = async () => {
+
+			const canvas = getCanvas();
+
+			const data = await fetchJson('/api/list');
+
+			const columnDefs = [
+				{ heading: 'MAME Version', columnName: 'version' },
+				{ heading: 'MAME Binary Time', columnName: 'binary_time' },
+				{ heading: 'Save Name', columnName: 'sta_name' },
+				{ heading: 'Save Time', columnName: 'sta_time' },
+				{ heading: 'Machine Name', columnName: 'sta_machine' },
+				{ heading: 'Machine Description', columnName: 'sta_description' },
+			];
+
+			const table = document.createElement('table');
+			table.style = 'margin-left: auto; margin-right: auto;';
+
+			buildTable(columnDefs, data.results, table, (columnDef, result, resultIndex, row, cell) => {
+
+				switch (columnDef.columnName) {
+
+					case 'version':
+						cell.innerHTML = `<a href="#" onclick="runCommand('.${result.version}'); return false;">${result.version}</a>`;
+						break;
+
+					case 'sta_machine':
+						if (result.sta_machine !== undefined)
+							cell.innerHTML = `<a href="#" onclick="runCommand('.${result.version} ${result.sta_machine}'); return false;">${result.sta_machine}</a>`;
+						break;
+
+					default:
+						if (result[columnDef.columnName] !== undefined)
+							cell.innerHTML = result[columnDef.columnName];
+						break;
+				}
+			});
+
+			canvas.appendChild(table);
+		}
+
+		//
+		// Run Reports
+		//
+		const runReports = async () => {
+
+			const canvas = getCanvas();
+
+			let html = '';
+
+			html += 'Click report code to run report. It will pop up in default browser when finished.';
+
+			const report_groups = await fetchJson('/api/report_groups');
+			const report_types = await fetchJson('/api/report_types');
+
+			report_groups.results.forEach((report_group, index) => {
+
+				if (index > 0)
+					html += '<hr />';
+
+				html += `<h2>${report_group.text} (${report_group.key})</h2>`;
+				html += `<p>${report_group.description}</p>`;
+
+				html += '<table>';
+				html += '<tr><th>key</th><th>code</th><th>text</th><th>description</th></tr>';
+
+				report_types.results.filter(report_type => report_type.group === report_group.key).forEach(report_type => {
+
+					html += `<tr><td>${report_type.key}</td><td><a href="#" onclick="runCommand('.report ${report_type.code}'); return false;" >${report_type.code}</a></td><td>${report_type.text}</td><td>${report_type.description}</td></tr>`;
+				});
+
+				html += '</table>';
+			});
+
+			const div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+		}
+
+		//
+		// View Reports
+		//
+		const viewReports = async () => {
+
+			const canvas = getCanvas();
+
+			const data = await fetchJson('/api/reports');
+
+			const table = document.createElement('table');
+			table.style = 'margin-left: auto; margin-right: auto;';
+
+			const headRow = document.createElement('tr');
+			let cell;
+
+			cell = document.createElement('th');
+			cell.innerHTML = 'Report Date';
+			headRow.appendChild(cell);
+
+			cell = document.createElement('th');
+			cell.innerHTML = 'Report Description';
+			headRow.appendChild(cell);
+
+			table.appendChild(headRow);
+
+			data.results.forEach((report) => {
+
+				const tableRow = document.createElement('tr');
+
+				let cell;
+
+				cell = document.createElement('td');
+				cell.innerHTML = `<a href="${_baseUrl}/api/report?name=${encodeURIComponent(report.name)}" target="_blank">${report.date.replace('T', ' ')}</a>`;
+				tableRow.appendChild(cell);
+
+				cell = document.createElement('td');
+				cell.innerHTML = `${report.description}`;
+				tableRow.appendChild(cell);
+
+				table.appendChild(tableRow);
+			});
+
+			canvas.appendChild(table);
+		}
+
+		//
+		// SQL Query
+		//
+		const sqlReports = async () => {
+
+			const canvas = getCanvas();
+
+			let html = `<select id="commandDatabase">`;
+			['machine', 'software'].forEach((database) => {
+				html += `<option value="${database}">${database}</option>`;
+			});
+			html += '</select>';
+			html += '<button id="commandButton" type="submit" onclick="sqlReportsExecute(commandDatabase.value, commandText.value); return false;">Query</button>';
+			html += '<input type="checkbox" id="commandSaveReport">Save Report</input>';
+			html += '<hr /><textarea id="commandText" rows="8" style="width: 100%; box-sizing: border-box;"></textarea>';
+			html += '<hr /><div id="commandResult"></div>';
+
+			const div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+
+			const textarea = document.getElementById('commandText');
+			textarea.focus();
+		}
+		const sqlReportsExecute = async (database, commandText) => {
+
+			const button = document.getElementById('commandButton');
+			button.disabled = true;
+			button.innerHTML = 'Running Command...';
+
+			const checkboxSaveReport = document.getElementById('commandSaveReport');
+
+			const response = await fetch(`${_baseUrl}/api/sql_query?database=${database}&save=${checkboxSaveReport.checked}`, {
+				method: 'POST',
+				body: commandText,
+			});
+
+			const result = await response.json();
+
+			const resultDiv = document.getElementById("commandResult");
+			resultDiv.innerHTML = '';
+
+			if (result.results !== undefined) {
+
+				if (checkboxSaveReport.checked === false) {
+
+					const table = document.createElement('table');
+					resultDiv.appendChild(table);
+
+					const headRow = document.createElement('tr');
+					result.column_names.forEach((columnName) => {
+						const th = document.createElement('th');
+						th.innerHTML = columnName;
+						headRow.appendChild(th);
+					});
+					table.appendChild(headRow);
+
+					result.results.forEach(item => {
+
+						const row = document.createElement('tr');
+						result.column_names.forEach((columnName) => {
+							const td = document.createElement('td');
+							td.innerHTML = item[columnName] !== undefined ? htmlEncode(`${item[columnName]}`) : '';
+							row.appendChild(td);
+						});
+						table.appendChild(row);
+
+					});
+				} else {
+					resultDiv.innerHTML = `Report Saved, rows: ${result.results.length}`;
+				}
+
+			} else {
+				resultDiv.innerHTML = result.message;
+			}
+
+			button.disabled = false;
+			button.innerHTML = 'Query';
+		}
+
+		//
+		// Genres
+		//
+		const genres = async () => {
+
+			const canvas = getCanvas();
+
+			const genre_groups = await fetchJson('/api/genre_groups');
+
+			const columnDefs = [
+				{ heading: 'Genre Group', columnName: 'group_name' },
+				{ heading: 'Status Good', columnName: 'good' },
+				{ heading: 'Status Imperfect', columnName: 'imperfect' },
+				{ heading: 'Status Preliminary', columnName: 'preliminary' },
+			];
+
+			const table = document.createElement('table');
+			table.style = 'margin-left: auto; margin-right: auto;';
+
+			buildTable(columnDefs, genre_groups.results, table, (columnDef, result, resultIndex, row, cell) => {
+
+				let html;
+
+				const value = result[columnDef.columnName];
+
+				switch (columnDef.columnName) {
+
+					case 'group_name':
+						html = `<a href="${_baseUrl}/genres/${encodeURIComponent(value)}">${value}</a>`;
+						break;
+
+					default:
+						html = value;
+						break;
+				}
+
+				if (html === 0)
+					html = '';
+
+				cell.innerHTML = html;
+
+			});
+
+			canvas.appendChild(table);
+		}
+
+		//
+		// Genres Group
+		//
+		const genresGroup = async () => {
+
+			const canvas = getCanvas();
+
+			let parts = _pathParts[2].split('/');
+			const group_name = decodeURIComponent(parts[parts.length - 1]);
+
+			const genres = await fetchJson(`/api/genres?group_name=${encodeURIComponent(group_name)}`);
+
+			const columnDefs = [
+				{ heading: 'Genre', columnName: 'genre_name' },
+				{ heading: 'Status Good', columnName: 'good' },
+				{ heading: 'Status Imperfect', columnName: 'imperfect' },
+				{ heading: 'Status Preliminary', columnName: 'preliminary' },
+			];
+
+			const table = document.createElement('table');
+			table.style = 'margin-left: auto; margin-right: auto;';
+
+			buildTable(columnDefs, genres.results, table, (columnDef, result, resultIndex, row, cell) => {
+
+				let html;
+
+				const value = result[columnDef.columnName];
+
+				switch (columnDef.columnName) {
+
+					case 'genre_name':
+						html = `<a href="${_baseUrl}/genres/${encodeURIComponent(group_name)}/${encodeURIComponent(value)}">${value}</a>`;
+						break;
+
+					default:
+						html = value;
+						break;
+				}
+
+				if (html === 0)
+					html = '';
+
+				cell.innerHTML = html;
+
+			});
+
+			canvas.appendChild(table);
+		}
+
+		//
+		// Machines in Genre
+		//
+		const genreMachines = async () => {
+
+			let parts = _pathParts[3].split('/');
+			const genre_name = decodeURIComponent(parts[parts.length - 1]);
+
+			const genres = await fetchJson(`/api/genres?genre_name=${encodeURIComponent(genre_name)}`);
+			const genre_id = genres.results[0].genre_id;
+
+			await showMachines(`genre-${genre_id}`);
+		}
+
+		//
+		// Machines in Data Profile
+		//
+		const machines = async () => {
+
+			let parts = _pathParts[2].split('/');
+			const profile = parts[parts.length - 1];
+
+			await showMachines(profile);
+		}
+
+		//
+		// Show Machines
+		//
+		const showMachines = async (profile) => {
+
+			const [machinesData, filtersData] = await Promise.all([
+				fetchJson(makeParameters('/api/machines', { ..._parameters, profile })),
+				fetchJson('/api/filters')
+			]);
+
+			if (profile.startsWith('genre'))
+				profile = 'everything';
+
+			const canvas = getCanvas();
+
+			let body;
+
+			const target = (result) => {
+				switch (_info.core_name) {
+                    case 'fbneo':
+						return `href="#" onclick="runCommand('${result.name}@${result.ao_type}@${_info.core_name}'); return false;"`;
+						break;
+					default:
+						return result.ao_softwarelist_count > 0 ?
+							`href="${_baseUrl}/machines/${profile}/${result.name}"` :
+							`href="#" onclick="runCommand('${result.name}@${_info.core_name}'); return false;"`;
+				}
+			}
+
+            const webLink = (result) => {
+				switch (_info.core_name) {
+                    case 'fbneo':
+						return `https://data.spludlow.co.uk/fbneo/${result.ao_type}/${result.name}`;
+						break;
+                    default:
+						return `https://data.spludlow.co.uk/${_info.core_name}/machine/${result.name}`;
+				}
+			};
+
+			if (_parameters.view === 'grid') {
+
+				body = document.createElement('div');
+				body.className = 'card-grid';
+
+				machinesData.results.forEach((result) => {
+
+					const item = document.createElement('div');
+                    item.className = `card-${result.ao_status}`;
+
+					const card = `
+						<div class="card-body">
+							<div class="card-name">
+								<a class="card-link" href="${webLink(result)}" target="_blank">${result.name}</a>
+								<div>
+									<input type="checkbox" class="fav-checkbox" id="fav_${result.name}" onclick="changeFavoriteMachine(this.id)" ${result.favorite ? 'checked' : ''} />
+									<label for="fav_${result.name}" class="star"></label>
+								</div>
+							</div>
+							<div class="card-thumb">
+								<a ${target(result)} class="card-link">
+									<img src="${result.ao_image}" alt="${result.description}" loading="lazy" />
+								</a>
+							</div>
+							<div>${htmlEncode(result.description)}</div>
+							<div class="card-year">${result.year}</div>
+							<div>${htmlEncode(result.manufacturer)}</div>
+						</div>
+					`;
+
+					item.innerHTML = card;
+
+					const img = item.querySelector('.card-thumb img');
+					img.addEventListener('error', () => {
+						img.src = 'data:image/svg+xml;base64,' + btoa(`
+							<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">
+								<rect width="128" height="128" fill="#262626"/>
+								<text x="50%" y="50%" font-size="18" fill="#fff" text-anchor="middle" alignment-baseline="central">
+									no image
+								</text>
+							</svg>
+						`);
+						img.alt = 'Image not available';
+					});
+
+					body.appendChild(item);
+				});
+
+			} else {
+
+				body = document.createElement('table');
+				body.style = 'width:100%;';
+
+				const columnDefs = [
+					{ heading: 'name', columnName: 'name' },
+					{ heading: '', columnName: 'favorite' },
+					{ heading: 'description', columnName: 'description' },
+					{ heading: 'status', columnName: 'ao_status' },
+					{ heading: 'year', columnName: 'year' },
+					{ heading: 'manufacturer', columnName: 'manufacturer' },
+					{ heading: 'roms', columnName: 'ao_rom_count' },
+					{ heading: 'disks', columnName: 'ao_disk_count' },
+					{ heading: 'lists', columnName: 'ao_softwarelist_count' },
+					{ heading: 'cloneof', columnName: 'cloneof' },
+					{ heading: 'romof', columnName: 'romof' },
+				];
+
+				buildTable(columnDefs, machinesData.results, body, (columnDef, result, resultIndex, row, cell) => {
+
+					const value = result[columnDef.columnName];
+
+					if (value === undefined)
+						return;
+
+					cell.innerHTML = value;
+
+					switch (columnDef.columnName) {
+						case 'name':
+							cell.innerHTML = `<a ${target(result)}>${result.name}</a>`;
+							break;
+
+						case 'favorite':
+							cell.innerHTML = `
+								<div>
+									<input type="checkbox" class="fav-checkbox" id="fav_${result.name}" onclick="changeFavoriteMachine(this.id)" ${result.favorite ? 'checked' : ''} />
+									<label for="fav_${result.name}" class="star"></label>
+								</div>`;
+							break;
+
+						case 'description':
+							cell.innerHTML = `<a href="${webLink(result)}" target="_blank">${htmlEncode(result.description) }</a>`;
+							break;
+
+						case 'ao_status':
+							cell.className = result.ao_status;
+							break;
+
+						case 'cloneof':
+							cell.innerHTML = `<a href="/machines/everything?search=${value}">${value}</a>`;
+							break;
+
+						case 'romof':
+							cell.innerHTML = `<a href="/machines/everything?search=${value}">${value}</a>`;
+							break;
+
+						case 'manufacturer':
+							cell.innerHTML = htmlEncode(value);
+							break;
+
+					}
+
+					if (cell.innerHTML === '0')
+						cell.innerHTML = '';
+				});
+
+			}
+
+			const navHtml = navigateHtml(machinesData);
+
+			let div = document.createElement('div');
+			div.innerHTML = `
+				<div class="toolbar-input">
+					<input id="inputText" type="text" placeholder="machine name & description" />
+					<input id="manufacturerText" type="text" placeholder="manufacturer" />
+					<button type="submit" onclick="searchMachine(); return false;">Search</button>
+				</div>
+				<div class="toolbar" id="filters">
+				</div>
+				<hr />
+				<nav>${navHtml}</nav>
+				<hr />
+				<div id="results"></div>
+				<hr />
+				<nav>${navHtml}</nav>
+			`;
+			canvas.appendChild(div);
+
+			const filtersDiv = document.getElementById("filters");
+
+			Object.keys(filtersData.machine).forEach((name) => {
+				const filterDiv = document.createElement('div');
+				filterDiv.className = 'checkbox-group';
+				filterDiv.innerHTML = `${filtersData.machine[name].values.map(value =>
+					`<label><input id="${name}-${value}" type="${filtersData.machine[name].type}" name="${name}" value="${value}" onchange="changeFilter('${name}', this);">${value}</label>`
+				).join('')}`;
+
+				filtersDiv.appendChild(filterDiv);
+			});
+
+			div = document.createElement('div');
+			div.className = 'checkbox-group';
+			div.innerHTML = `
+					<label><input id="order-description" type="radio" name="order" value="description" onchange="changeOrder(this);">description</label>
+					<label><input id="order-year" type="radio" name="order" value="year" onchange="changeOrder(this);">year</label>
+					<label><input id="sort-asc" type="radio" name="sort" value="asc" onchange="changeSort(this);">asc</label>
+					<label><input id="sort-desc" type="radio" name="sort" value="desc" onchange="changeSort(this);">desc</label>`;
+			filtersDiv.appendChild(div);
+
+			div = document.createElement('div');
+			div.className = 'checkbox-group';
+			div.innerHTML = `
+						<label><input id="view-grid" type="radio" name="view" value="grid" onchange="changeView(this);">grid</label>
+						<label><input id="view-list" type="radio" name="view" value="list" onchange="changeView(this);">list</label>`;
+			filtersDiv.appendChild(div);
+
+			document.getElementById("inputText").value = _parameters.search;
+			document.getElementById("manufacturerText").value = _parameters.manufacturer;
+
+			document.querySelectorAll('input[name="status"]').forEach(cb => cb.checked = _parameters.status.includes(cb.value));
+			document.querySelectorAll('input[name="display"]').forEach(cb => cb.checked = _parameters.display.includes(cb.value));
+			document.querySelectorAll('input[name="control"]').forEach(cb => cb.checked = _parameters.control.includes(cb.value));
+			document.querySelectorAll('input[name="players"]').forEach(cb => cb.checked = _parameters.players.includes(cb.value));
+
+			if (_parameters.mechanical === null)
+				document.getElementById("mechanical-all").checked = true;
+			else
+				if (_parameters.mechanical === true)
+					document.getElementById("mechanical-mechanical").checked = true;
+				else
+					document.getElementById("mechanical-electronic").checked = true;
+
+			if (_parameters.clone === null)
+				document.getElementById("clone-all").checked = true;
+			else
+				if (_parameters.clone === true)
+					document.getElementById("clone-clone").checked = true;
+				else
+					document.getElementById("clone-parent").checked = true;
+
+			document.getElementById(`order-${_parameters.order}`).checked = true;
+			document.getElementById(`sort-${_parameters.sort}`).checked = true;
+			document.getElementById(`view-${_parameters.view}`).checked = true;
+
+			const results = document.getElementById('results');
+
+			results.appendChild(body);
+
+			if (machinesData.results.length === 0)
+				results.insertAdjacentHTML('beforeend', `<p><b>No results - try looking in <a href="/machines/everything?search=${_parameters.search}">Everything</a></b></p>`);
+
+			document.getElementById('inputText').focus();
+		}
+
+		const changeFavoriteMachine = async (checkBoxId) => {
+			const checkBox = document.getElementById(checkBoxId);
+			const name = checkBoxId.substring(4);
+			const command = checkBox.checked ? ".favm" : ".favmx";
+			await runCommand(`${command} ${name}`);
+		}
+		const searchMachine = () => {
+			_parameters['search'] = document.getElementById('inputText').value;
+			_parameters['manufacturer'] = document.getElementById('manufacturerText').value;
+			_parameters['offset'] = 0;
+			document.location = makeParameters(_path, _parameters);
+		}
+
+		const changeFilter = (name, input) => {
+			switch (name) {
+				case 'status':
+				case 'display':
+				case 'control':
+				case 'players':
+					_parameters[name] = Array.from(document.querySelectorAll(`input[name="${name}"]:checked`)).map(item => item.value);
+					break;
+
+				case 'clone':
+				case 'mechanical':
+					_parameters[name] = input.value === 'all' ? null : input.value === name;
+					break;
+			}
+			_parameters['offset'] = 0;
+			document.location = makeParameters(_path, _parameters);
+		}
+
+		const changeOrder = (input) => {
+			_parameters.order = input.value;
+			_parameters['offset'] = 0;
+			document.location = makeParameters(_path, _parameters);
+		}
+		const changeSort = (input) => {
+			_parameters.sort = input.value;
+			_parameters['offset'] = 0;
+			document.location = makeParameters(_path, _parameters);
+		}
+		const changeView = (input) => {
+			_parameters.view = input.value;
+			document.location = makeParameters(_path, _parameters);
+		}
+
+		//
+		// Machine (Show software)
+		//
+		const machine = async (machineData) => {
+
+			let parts = _pathParts[4].split('/');
+			const softwarelist = parts[parts.length - 1];
+
+			const softwareData = await fetchJson(makeParameters('/api/software', { ..._parameters, softwarelist, favorites_machine: machineData.name }));
+
+			const canvas = getCanvas();
+
+			let body;
+
+			if (_parameters.view === 'grid') {
+
+				body = document.createElement('div');
+				body.className = 'card-grid';
+
+				softwareData.results.forEach((result) => {
+
+					const item = document.createElement('div');
+					item.className = `card-${result.supported}`;
+
+					const card = `
+						<div class="card-body">
+							<div class="card-name">
+								<a class="card-link" href="https://data.spludlow.co.uk/${_info.core_name}/software/${result.softwarelist_name}/${result.name}" target="_blank">${result.name}</a>
+								<div>
+									<input type="checkbox" class="fav-checkbox" id="fav_${result.name}" onclick="changeFavoriteSoftware(this.id, '${machineData.name}', '${result.softwarelist_name}')" ${result.favorite ? 'checked' : ''} />
+									<label for="fav_${result.name}" class="star"></label>
+								</div>
+							</div>
+							<div class="card-thumb">
+								<a href="#" onclick="runCommand('${machineData.name}@${_info.core_name} ${result.name}@${result.softwarelist_name}'); return false;" class="card-link">
+									<img src="https://data.spludlow.co.uk/${_info.core_name}/software/${result.softwarelist_name}/${result.name}.jpg" alt="${result.description}" loading="lazy" />
+								</a>
+							</div>
+							<div>${htmlEncode(result.description)}</div>
+							<div class="card-year">${result.year}</div>
+							<div>${htmlEncode(result.publisher)}</div>
+						</div>
+					`;
+
+					item.innerHTML = card;
+
+					const img = item.querySelector('.card-thumb img');
+					img.addEventListener('error', () => {
+						img.src = 'data:image/svg+xml;base64,' + btoa(`
+							<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">
+								<rect width="128" height="128" fill="#262626"/>
+								<text x="50%" y="50%" font-size="18" fill="#fff" text-anchor="middle" alignment-baseline="central">
+									no image
+								</text>
+							</svg>
+						`);
+						img.alt = 'Image not available';
+					});
+
+					body.appendChild(item);
+				});
+
+
+			} else {
+
+				const columnDefs = [
+					{ heading: 'name', columnName: 'name' },
+					{ heading: '', columnName: 'favorite' },
+					{ heading: 'description', columnName: 'description' },
+					{ heading: 'supported', columnName: 'supported' },
+					{ heading: 'year', columnName: 'year' },
+					{ heading: 'publisher', columnName: 'publisher' },
+					{ heading: 'cloneof', columnName: 'cloneof' },
+				];
+
+				if (_path.endsWith('/@fav') === true)
+					columnDefs.push({ heading: 'software list', columnName: 'softwarelist_name' });
+
+				body = document.createElement('table');
+				body.style = 'width:100%;';
+
+				buildTable(columnDefs, softwareData.results, body, (columnDef, result, resultIndex, row, cell) => {
+
+					switch (columnDef.columnName) {
+						case 'name':
+							cell.innerHTML = `<a id="${result.name}" href="#" onclick="runCommand('${machineData.name}@${_info.core_name} ${result.name}@${result.softwarelist_name}'); return false;">${result.name}</a>`;
+							break;
+
+						case 'favorite':
+							cell.innerHTML = `
+								<div>
+									<input type="checkbox" class="fav-checkbox" id="fav_${result.name}" onclick="changeFavoriteSoftware(this.id, '${machineData.name}', '${result.softwarelist_name}')" ${result.favorite ? 'checked' : ''} />
+									<label for="fav_${result.name}" class="star"></label>
+								</div>`;
+							break;
+
+						case 'description':
+							cell.innerHTML = `<a href="https://data.spludlow.co.uk/${_info.core_name}/software/${result.softwarelist_name}/${result.name}" target="_blank">${result.description}</a>`;
+							break;
+
+						case 'publisher':
+							cell.innerHTML = htmlEncode(result[columnDef.columnName]);
+							break;
+
+						case 'supported':
+							cell.className = result.supported;
+							cell.innerHTML = result.supported;
+							break;
+
+						default:
+							cell.innerHTML = result[columnDef.columnName] || '';
+							break;
+					}
+				});
+			}
+
+			const navHtml = navigateHtml(softwareData);
+
+			let html = `
+				<div class="toolbar-input">
+					<input id="inputText" type="text" placeholder="software name & description" />
+					<input id="publisherText" type="text" placeholder="publisher" />
+					<button type="submit" onclick="searchSoftware(); return false;">Search</button>
+				</div>
+				<div class="toolbar">
+					<div class="checkbox-group">
+						<label><input id="order-description" type="radio" name="order" value="description" onchange="changeOrder(this);">description</label>
+						<label><input id="order-year" type="radio" name="order" value="year" onchange="changeOrder(this);">year</label>
+						<label><input id="sort-asc" type="radio" name="sort" value="asc" onchange="changeSort(this);">asc</label>
+						<label><input id="sort-desc" type="radio" name="sort" value="desc" onchange="changeSort(this);">desc</label>
+					</div>
+					<div class="checkbox-group">
+						<label><input id="view-grid" type="radio" name="view" value="grid" onchange="changeView(this);">grid</label>
+						<label><input id="view-list" type="radio" name="view" value="list" onchange="changeView(this);">list</label>
+					</div>
+				</div>
+				<hr />
+				<nav>${navHtml}</nav>
+				<hr />
+				<div id="results"></div>
+				<hr />
+				<nav>${navHtml}</nav>
+			`;
+
+			const div = document.createElement('div');
+			div.innerHTML = html;
+			canvas.appendChild(div);
+
+			document.getElementById("inputText").value = _parameters.search;
+			document.getElementById("publisherText").value = _parameters.publisher;
+			document.getElementById(`order-${_parameters.order}`).checked = true;
+			document.getElementById(`sort-${_parameters.sort}`).checked = true;
+			document.getElementById(`view-${_parameters.view}`).checked = true;
+
+			const results = document.getElementById('results');
+
+			results.appendChild(body);
+
+			const inputText = document.getElementById('inputText');
+			inputText.focus();
+		}
+		const changeFavoriteSoftware = async (checkBoxId, machineName, listName) => {
+			const checkBox = document.getElementById(checkBoxId);
+			const softwareName = checkBoxId.substring(4);
+			const command = checkBox.checked ? ".favs" : ".favsx";
+			await runCommand(`${command} ${machineName} ${listName} ${softwareName}`);
+		}
+
+		const searchSoftware = async () => {
+			_parameters['search'] = document.getElementById('inputText').value;
+			_parameters['publisher'] = document.getElementById('publisherText').value;
+			_parameters['offset'] = 0;
+			document.location = makeParameters(_path, _parameters);
+		}
+
+		const goLocationUrl = (offset) => makeParameters(_path, { ..._parameters, offset });
+
+		const navigateHtml = (data) => {
+
+			const limit = data.limit;
+			const offset = data.offset;
+			const total = data.total;
+			const count = data.count;
+
+			let nav = '<div class="toolbar">';
+
+			let prevOffset = offset - limit;
+			nav += prevOffset >= 0 ?
+				`<a href="${goLocationUrl(prevOffset)}"><img class="arrow" src="/images/back.svg" alt="Navigate back a page" /></a> &bull;` :
+				'<div><img class="arrow" src="/images/back.svg" alt="On first page" /></div> &bull;';
+
+			let nextOffset = offset + limit;
+			nav += nextOffset < total ?
+				`<a href="${goLocationUrl(nextOffset)}"><img class="arrow" src="/images/next.svg" alt="Navigate to next page" /></a> &bull;` :
+				'<div><img class="arrow" src="/images/next.svg" alt="On last page" /></div> &bull;';
+
+			let lastOffset = Math.floor(total / limit) * limit;
+			if (total > 0 && total % limit === 0)
+				lastOffset -= limit;
+
+			nav += `<div>page <a href="${goLocationUrl(0)}">${offset / limit + 1}</a> ` +
+				`of <a href="${goLocationUrl(lastOffset)}">${Math.ceil(total / limit)}</a></div> &bull;` +
+				`<div>view ${count} of ${total}</div>`;
+
+			nav += '</div>';
+
+			return nav;
+		}
+
+		//
+		// Code Tools
+		//
+
+		const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+		const fetchJson = async (url, base = _baseUrl) => (await fetch(`${base}${url}`)).json();
+
+		const getCanvas = () => {
+			const page = document.getElementById('canvas');
+			page.innerHTML = '';
+			return page;
+		}
+
+		const runCommand = async (line) => {
+
+			const response = await fetch(`${_baseUrl}/api/command?line=${encodeURIComponent(line)}`);
+
+			const result = await response.json();
+
+			if (response.status !== 200)
+				alert(result.message);
+		}
+
+		const buildTableHeader = (columnDefs, table) => {
+			const headRow = document.createElement('tr');
+			columnDefs.forEach((columnDef) => {
+				const cell = document.createElement('th');
+				cell.innerHTML = columnDef.heading;
+				headRow.appendChild(cell);
+			});
+			table.appendChild(headRow);
+		}
+
+		const buildTable = (columnDefs, results, table, cellFunction) => {
+
+			buildTableHeader(columnDefs, table);
+
+			results.forEach((result, resultIndex) => {
+
+				const row = document.createElement('tr');
+
+				columnDefs.forEach((columnDef) => {
+					const cell = document.createElement('td');
+					cellFunction(columnDef, result, resultIndex, row, cell);
+					row.appendChild(cell);
+				});
+
+				table.appendChild(row);
+			});
+		}
+
+		const _defaultParamters = {
+			offset: 0,
+			search: '',
+			manufacturer: '',
+			publisher: '',
+			status: [],
+			display: [],
+			control: [],
+			players: [],
+			mechanical: null,
+			clone: null,
+			order: 'description',
+			sort: 'asc',
+			view: 'grid',
+		};
+		const _machine_statuses = [
+			'good',
+			'imperfect',
+			'preliminary',
+			'bad',
+		];
+
+		const makeParameters = (url, parameters) => {
+			const partKeys = Object.keys(parameters).filter((key) => {
+				if (Array.isArray(parameters[key]))
+					return parameters[key].length > 0;
+				else
+					return parameters[key] !== _defaultParamters[key];
+			});
+
+			const parts = [];
+
+			partKeys.forEach(key => {
+				const value = parameters[key];
+				if (Array.isArray(value))
+					value.forEach(itemValue => parts.push(`${key}=${encodeURIComponent(itemValue)}`));
+				else
+					parts.push(`${key}=${encodeURIComponent(value)}`);
+			});
+
+			if (parts.length === 0)
+				return url;
+			else
+				return url + '?' + parts.join('&');
+		}
+
+		const getRequestInfo = () => {
+
+			_parameters = JSON.parse(JSON.stringify(_defaultParamters));
+
+			if (window.location.href.includes('?')) {
+				const parts = window.location.href.split('?')[1].split('&');
+				parts.forEach((part) => {
+					const pair = part.split('=');
+					const key = pair[0];
+					const value = decodeURIComponent(pair[1]);
+
+					switch (key) {
+						case 'offset':
+							_parameters[key] = parseInt(value, 10);
+							break;
+
+						case 'search':
+						case 'manufacturer':
+						case 'publisher':
+						case 'order':
+						case 'sort':
+						case 'view':
+							_parameters[key] = value;
+							break;
+
+						case 'status':
+							if (_machine_statuses.includes(value) && !_parameters.status.includes(value))
+								_parameters.status.push(value);
+							break;
+
+						case 'display':
+						case 'control':
+						case 'players':
+							if (!_parameters[key].includes(value))
+								_parameters[key].push(value);
+							break;
+
+						case 'mechanical':
+						case 'clone':
+							if (['true', 'false'].includes(value))
+								_parameters[key] = value === 'true';
+							break;
+					}
+				});
+			}
+
+			_baseUrl = window.location.origin;
+
+			_path = document.location.pathname;
+
+			_pathParts = [];
+
+			if (_path === '/') {
+				_pathParts.push('/');
+			} else {
+				_path.split('/').forEach((part) => {
+					if (part !== undefined) {
+						let prev = '';
+						if (_pathParts.length > 1)
+							prev = _pathParts[_pathParts.length - 1];
+
+						_pathParts.push(prev + '/' + part);
+					}
+				});
+			}
+		}
+
+		const htmlEncode = (html = '') => html.replace(/[&<>'"]/g,
+			tag => ({
+				'&': '&amp;',
+				'<': '&lt;',
+				'>': '&gt;',
+				"'": '&#39;',
+				'"': '&quot;'
+			}[tag]));
+
+		//
+		// Menu
+		//
+
+		const displayMenu = () => {
+
+			const versions = `AO V${_info.version} (${_info.core_name?.toUpperCase()} ${_info.core_version})`;
+
+			_rootMenu[0].text = versions;
+			_rootMenu[0].title = versions;
+
+			displayMenuWalk(_rootMenu);
+
+			// Shuffle down the menu on the left
+			if (_currentMenu && _currentMenu.menu && _currentMenu.menu[0].href)
+				document.location = `${_baseUrl}${_currentMenu.menu[0].href}`;
+		}
+
+		const displayMenuWalk = (menu) => {
+
+			const nav = document.getElementById('nav');
+			const heading = document.getElementById('heading');
+
+            const div = document.createElement('div');
+			div.className = 'nav-row';
+
+			let found;
+
+			menu.forEach((item) => {
+				const ahref = document.createElement('a');
+				ahref.className = 'nav-off';
+
+				if (_pathParts.includes(item.href)) {
+
+                    ahref.className = 'nav-on';
+
+					found = item;
+					document.title = item.title;
+					heading.innerHTML = item.title;
+				}
+
+				if (_path === item.href)
+					_currentMenu = item;
+
+                if (item.style)
+					ahref.style = item.style;
+
+                ahref.href = item.href;
+				ahref.title = item.title;
+				ahref.innerHTML = item.text;
+
+				div.appendChild(ahref);
+			});
+
+			nav.appendChild(div);
+
+			if (found && found.menu)
+				displayMenuWalk(found.menu);
+		}
+
+		//
+		// Load
+		//
+
+		window.onload = main;
+
+	</script>
+
+</head>
+<body>
+	<div class="header">
+		<a href="/"><img src="/images/logo.svg" width="120" height="64" alt="mame-ao logo"></a>
+		<h1 id="heading"></h1>
+	</div>
+
+	<nav id="nav">
+	</nav>
+
+	<br />
+
+	<div id="error"></div>
+
+	<form>
+		<div id="canvas">
+			<p>Loading...</p>
+		</div>
+	</form>
+
+	<hr />
+
+</body>
+</html>

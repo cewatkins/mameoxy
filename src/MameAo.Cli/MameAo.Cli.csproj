@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>mame-ao</AssemblyName>
+    <RootNamespace>Spludlow.MameAO.Cli</RootNamespace>
+    <Version>0.10.0</Version>
+    <AssemblyVersion>0.10.0.0</AssemblyVersion>
+    <FileVersion>0.10.0.0</FileVersion>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MameAo.Core\MameAo.Core.csproj" />
+    <ProjectReference Include="..\MameAo.Platform.Linux\MameAo.Platform.Linux.csproj" />
+  </ItemGroup>
+
+  <!--
+    Release builds pass -p:DomeBtBinary=<published dome-bt> so the tarball is a
+    single executable. Development builds without it simply report that
+    BitTorrent is unavailable.
+  -->
+  <ItemGroup Condition="'$(DomeBtBinary)' != '' and Exists('$(DomeBtBinary)')">
+    <EmbeddedResource Include="$(DomeBtBinary)" LogicalName="dome-bt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="UI.html" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

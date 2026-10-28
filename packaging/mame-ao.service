@@ -1,0 +1,27 @@
+[Unit]
+Description=MAME-AO front end for MAME (web UI)
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mame-ao --headless
+Restart=on-failure
+RestartSec=10
+
+# archive.org credentials: either put them in this file (mode 0600) or write
+# ~/.config/mame-ao/credentials. The "-" makes the file optional.
+EnvironmentFile=-%h/.config/mame-ao/env
+
+# Optional: repository that publishes this port's Linux release tarballs.
+# Environment=MAME_AO_UPDATE_REPO=owner/repo
+
+# MAME itself is a child process; stop the whole tree.
+KillMode=mixed
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

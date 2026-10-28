@@ -1,0 +1,16 @@
+# Build output and local scratch — never commit these.
+bin/
+obj/
+*.user
+.vs/
+.vscode/
+upstream/
+_artifacts/
+_testdata/
+*.log
+TestResults/
+
+# Local end-to-end runs (large, machine specific)
+.run*/
+.runtest/
+dist/

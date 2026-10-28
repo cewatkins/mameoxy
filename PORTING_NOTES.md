@@ -1,6 +1,6 @@
 # Porting `mame-ao` to Linux — discovery notes
 
-Status: **Phase 0 complete, awaiting stack decision.**
+Status: **Phase 1 implemented and running; see §12 for the record and §13 for what is still unproven.**
 Author: porting session, 2026-10-28.
 These notes are the running engineering log for the port. Section 9 is the
 recommendation; section 10 lists the decisions I need from you.
@@ -995,3 +995,118 @@ Test fixtures: synthetic zips/CHDs built in the test project (no copyrighted
 content); ROM-free machines for launch tests; a generated 2-machine XML for DB
 tests.
 
+
+---
+
+## 12. Phase 1 implementation record
+
+.NET 10 (`net10.0`), shared core, Linux host, self-contained single-file
+publish. `LINUX.md` is the user-facing document; this section is the engineering
+record and the list of deviations.
+
+### 12.1 Projects
+
+| Project | Assembly | Role |
+|---|---|---|
+| `src/MameAo.Core` | `MameAo.Core` | upstream logic under `Legacy/` plus new `Mame/` (provider, layout, ini, argv) and `Assets/FileDownloader.cs`; also compiled by the Windows CI job |
+| `src/MameAo.Cli` | `mame-ao` | Linux host: `--data-dir`/`--config-dir`/`--cache-dir`/`--mame-path`/`--listen`/`--headless`, XDG paths, instance lock, SIGTERM handling, embedded BitTorrent payload |
+| `src/MameAo.Platform.Linux` | `MameAo.Platform.Linux` | `UnixFileLinker`, `XdgShellOpener`, `EnvFileCredentialStore`, `LinuxEnvironment`, `LinuxPlatform.Create` |
+| `src/MameAo.Bt` | `dome-bt` | dome-bt port (MonoTorrent 3.0.2), published separately and embedded into `mame-ao` at packaging time |
+| `tests/MameAo.Tests` | — | xUnit; 86 tests (path layout, locator, ini, argv, hash store, placement, downloader, platform services, listener prefixes) |
+
+### 12.2 MAME discovery and layout
+
+`MameProvider.Get()` resolves in this order: `--mame-path`/`MAME` →
+`mame` on `PATH` → Flatpak → (never) a source build. `mame -version` is the only
+version source; `mame -showconfig` supplies `homepath`/`hashpath`, from which
+`-listxml`/`-listsoftware` are run with absolute `-hashpath` values. A requested
+version that does not match the installed binary is an error with the real
+version in the message, not a silent second download. HBMAME is registered but
+refuses with "no Linux build".
+
+Each MAME version gets `$DATA/mame/<dir>` containing a generated `mame.ini` with
+absolute `rompath`/`hashpath`/`cfg_directory`/`nvram_directory`/`state_directory`/
+`snapshot_directory` (separator `;` on every platform, as MAME expects), plus
+`hash` and `roms` symlinks and `ao_info.txt`. Nothing depends on the process
+working directory: MAME is started with an explicit `-inipath` and argv lists
+(`ProcessStartInfo.ArgumentList`, never a shell string).
+
+### 12.3 Deviations from the Windows original
+
+1. **Self-update is opt-in.** Upstream's latest tag (1.185) and this port's
+   version (0.10) are not comparable, and upstream releases are Windows zips;
+   `.up` would replace the binary with something that does not run. `MAME_AO_UPDATE_REPO=owner/repo`
+   enables it (expects `mame-ao-linux-<arch>.tar.gz`); otherwise `.up` and
+   `/api/info` report that it is not configured. Unconfigured builds no longer
+   fetch GitHub metadata for mame-ao at all.
+2. **The BitTorrent client is embedded, not downloaded.** `pack.sh` publishes
+   `dome-bt` for the same RID and embeds it as a resource; the host unpacks it to
+   `<cache>/bin/dome-bt` (0755) on first use and exports `MAME_AO_DOME_BT`.
+   A missing payload is a warning (archive.org still works), never fatal.
+   There is no "install dome-bt from GitHub" path on Linux.
+3. **Phone home defaults to `No`.** The original default was `Yes`; a port that
+   reports usage data without being asked is not acceptable.
+4. **`HttpListener` is IPv4-only on Linux.** The managed listener rejects every
+   IPv6 prefix at `Start()` with "Invalid port in prefix". Loopback therefore
+   produces a single `http://127.0.0.1:<port>/` prefix, `*` maps to
+   `http://*:<port>/`, and an explicit IPv6 `--listen` fails with a message that
+   names the default. The dual-stack fallback remains for Windows.
+5. **`System.Data.SqlClient` and `System.Drawing.Common` are retained** so the
+   shared core compiles unchanged, but MSSQL/Access paths and the Windows-only
+   cores throw `PlatformNotSupportedException` with a reason. FBNeo, Visual
+   Pinball, MS Access export and MSSQL admin are compiled out of reach, not
+   deleted.
+6. **`whatsnew.txt` is optional.** It ships with the Windows MAME zip; a native
+   install does not have it, so `/api/what` explains that instead of throwing.
+7. **Console shell is EOF-safe.** With no stdin (systemd) it says so once and
+   sleeps instead of printing the prompt forever.
+
+### 12.4 Downloads
+
+`Assets/FileDownloader` writes `<name>.part` plus a sidecar, resumes with
+`Range` only when the server answers 206 with a matching `Content-Range`, retries
+408/429/5xx/network/stall with jittered exponential backoff, verifies SHA1 and
+size, and renames onto the real name atomically. Nothing partial is ever placed
+in the hash store. archive.org uses the browser session cookie as before;
+credentials come from `IA_USERNAME`/`IA_PASSWORD`, then `MAMEAO_*`, then a 0600
+file, and are never logged.
+
+### 12.5 Packaging
+
+`packaging/pack.sh <rid> <version>` publishes both executables, fails unless the
+result is single-file (no neighbouring DLLs/native libraries), and writes
+`dist/mame-ao-<version>-<rid>.tar.gz` with `mame-ao`, `UI.html`, `LINUX.md` and
+`mame-ao.service` (systemd **user** unit, `--headless`, `KillMode=mixed`).
+`.github/workflows/ci.yml` runs `dotnet test` on x64, packages and smoke-tests
+both `linux-x64` and `linux-arm64` on native runners, compile-checks the shared
+core on Windows, and publishes release assets on `v*` tags.
+
+---
+
+## 13. Verification record
+
+Environment: x86_64, .NET SDK 10.0.113, `/usr/games/mame` 0.288
+(`mame0288-847-g84e1e905e45-dirty`), `/usr/bin/chdman` 0.285.
+
+| Check | Result |
+|---|---|
+| Fresh data directory: linked core dir, `_machine.xml` 320 MB, `_software.xml` 101 MB, both SQLite databases built, SHA1 load, genres | pass (`.run2`) |
+| Restart on the same directory | no re-extraction, no rebuild; only SHA1 load + genres |
+| Web UI served, `/api/what`, `/api/machines?profile=arcade` (12 220) | pass |
+| `.list`, `.snap` (real PNGs moved and reported), `.import` (synthetic zip, reported "Unknown" as designed), `.up` (unconfigured message) | pass |
+| Headless launch of `1292apvs` and `apexc` with `-seconds_to_run 5` | both reach "Average speed 100.00%" and exit 0 |
+| Single-file release tarball: `--version`, unpack embedded `dome-bt`, `.bt` starts it, API on 12381 | pass |
+| `dotnet test` | 86 passed |
+| `dotnet build MameAo.slnx` | 0 errors |
+
+Not proven here:
+
+* archive.org fetch-and-place with real credentials (credentials were never
+  supplied; `.fetch` would run into 401/403). Unit tests cover the downloader and
+  placement, and `.import` exercises the hash store, but the acceptance
+  criterion that needs an actual download is still open.
+* linux-arm64 execution: no aarch64 loader on this box. The artifact is built
+  and smoke-tested by CI on an arm64 runner instead.
+* A second real MAME version: the rebuild gate was exercised with a wrapper that
+  reports `0.289` (`.run3`), which creates `mame/0289` and rebuilds; the MAME
+  binary itself is unchanged.

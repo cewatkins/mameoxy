@@ -1,0 +1,701 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Reflection;
+using System.Text;
+using System.Threading.Tasks;
+
+using MonoTorrent;
+using MonoTorrent.Client;
+using MonoTorrent.PortForwarding;
+
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+
+namespace dome_bt
+{
+	public class WebServer
+	{
+		private HttpListener Listener;
+
+		private volatile bool Stopping = false;
+
+		public void StartListener()
+		{
+			if (HttpListener.IsSupported == false)
+				throw new ApplicationException("Http Listener Is not Supported");
+
+			//
+			// The managed HttpListener on Linux only answers requests whose Host
+			// header matches a registered prefix, so both "localhost" (what MAME-AO
+			// asks for) and the loopback literals are registered. "localhost" also
+			// binds ::1 when the host has IPv6.
+			//
+			Uri uri = new Uri(Globals.ListenAddress);
+			int port = uri.Port;
+
+			HashSet<string> prefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+			{
+				$"http://localhost:{port}/",
+				$"http://127.0.0.1:{port}/",
+			};
+
+			HttpListener listener = new HttpListener();
+			foreach (string prefix in prefixes)
+				listener.Prefixes.Add(prefix);
+
+			try
+			{
+				listener.Start();
+			}
+			catch (Exception e)
+			{
+				try
+				{
+					listener.Close();
+				}
+				catch (Exception)
+				{
+				}
+
+				throw new ApplicationException($"Failed to listen on port {port}: {e.Message}", e);
+			}
+
+			Listener = listener;
+
+			Tools.Log($"Listening on http://localhost:{port}/ and http://127.0.0.1:{port}/");
+
+			_ = Task.Run(() => ListenAsync(listener));
+		}
+
+		public void StopListener()
+		{
+			Stopping = true;
+
+			HttpListener listener = Listener;
+			if (listener == null)
+				return;
+
+			try
+			{
+				listener.Stop();
+			}
+			catch (Exception)
+			{
+			}
+
+			try
+			{
+				listener.Close();
+			}
+			catch (Exception)
+			{
+			}
+
+			Listener = null;
+		}
+
+		private async Task ListenAsync(HttpListener listener)
+		{
+			while (Stopping == false)
+			{
+				HttpListenerContext context;
+
+				try
+				{
+					context = await listener.GetContextAsync();
+				}
+				catch (HttpListenerException)
+				{
+					break;
+				}
+				catch (ObjectDisposedException)
+				{
+					break;
+				}
+				catch (InvalidOperationException)
+				{
+					break;
+				}
+
+				//
+				// Handle each request on its own task so one slow response (e.g. the
+				// 90,000 file /api/files listing) doesn't stall /api/info polling.
+				//
+				_ = Task.Run(() =>
+				{
+					try
+					{
+						HandleContext(context);
+					}
+					catch (Exception e)
+					{
+						Tools.ReportError(e, "API Request");
+					}
+				});
+			}
+		}
+
+		private void HandleContext(HttpListenerContext context)
+		{
+			context.Response.Headers.Add("Access-Control-Allow-Origin", "*");
+
+			context.Response.Headers["Content-Type"] = "application/json; charset=utf-8";
+
+			string path = context.Request.Url.AbsolutePath.ToLower();
+
+			using (StreamWriter writer = new StreamWriter(context.Response.OutputStream, new UTF8Encoding(false)))
+			{
+				try
+				{
+					if (context.Request.HttpMethod == "OPTIONS")
+					{
+						context.Response.Headers.Add("Allow", "OPTIONS, GET");
+					}
+					else
+					{
+						if (path.StartsWith("/api/") == true)
+						{
+							MethodInfo method = GetType().GetMethod(path.Replace("/", "_"));
+
+							if (method == null)
+							{
+								ApplicationException exception = new ApplicationException($"Not found: {path}");
+								exception.Data.Add("status", 404);
+								throw exception;
+							}
+
+							method.Invoke(this, new object[] { context, writer });
+						}
+						else
+						{
+							switch (path)
+							{
+								case "/favicon.ico":
+									context.Response.Headers["Content-Type"] = "image/x-icon";
+									context.Response.OutputStream.Write(_FavIcon, 0, _FavIcon.Length);
+									break;
+
+								default:
+									context.Response.Headers["Content-Type"] = "text/html; charset=utf-8";
+									writer.WriteLine(HTML);
+									break;
+							}
+						}
+					}
+
+				}
+				catch (Exception e)
+				{
+					if (e is TargetInvocationException && e.InnerException != null)
+						e = e.InnerException;
+
+					//
+					// HttpListenerException here means the client went away while we were
+					// writing the response, there is nothing to reply to.
+					//
+					if (e is HttpListenerException)
+					{
+						Tools.Log($"API Request aborted: {path} {e.Message}");
+					}
+					else
+					{
+						ErrorResponse(context, writer, e);
+					}
+				}
+			}
+		}
+
+		private void ErrorResponse(HttpListenerContext context, StreamWriter writer, Exception e)
+		{
+			int status = 500;
+
+			if (e is ApplicationException)
+				status = 400;
+
+			if (e.Data["status"] != null)
+				status = (int)e.Data["status"];
+
+			try
+			{
+				context.Response.StatusCode = status;
+
+				dynamic json = new JObject();
+
+				json.status = status;
+				json.message = e.Message;
+				json.error = e.ToString();
+
+				writer.WriteLine(json.ToString(Formatting.Indented));
+			}
+			catch (Exception writeError)
+			{
+				Tools.ReportError(writeError, "Error Response");
+			}
+
+			if (status != 404)
+			{
+				Tools.Heading($"API Request Error - {DateTime.Now}");
+				Tools.Log($"{status} - {context.Request.Url.PathAndQuery}");
+				Tools.Log(e.ToString());
+			}
+		}
+
+		public void _api_info(HttpListenerContext context, StreamWriter writer)
+		{
+			dynamic json = new JObject();
+
+			BitTorrent bitTorrent = Globals.BitTorrent;
+			ClientEngine engine = bitTorrent?.Engine;
+
+			json.version = Globals.AssemblyVersion;
+			json.pid = Globals.Pid;
+			json.port_number = bitTorrent?.PortNumber ?? 0;
+			json.cores = new JArray(Globals.Cores);
+			json.priorities = new JArray(Enum.GetNames(typeof(Priority)));
+			json.torrent_states = new JArray(Enum.GetNames(typeof(TorrentState)));
+			json.start_time = Globals.StartTime;
+			json.time_now = DateTime.Now;
+			json.run_time_text = Tools.TimeTookText(DateTime.Now - Globals.StartTime);
+			json.cache_directory = Globals.DirectoryCache;
+
+			if (Globals.ReadyTime != Globals.StartTime)
+				json.ready_seconds = (int)Math.Ceiling((Globals.ReadyTime - Globals.StartTime).TotalSeconds);
+
+			json.is_running = engine?.IsRunning ?? false;
+			json.half_open_connections = engine?.ConnectionManager.HalfOpenConnections ?? 0;
+			json.open_connections = engine?.ConnectionManager.OpenConnections ?? 0;
+			json.dht_state = engine?.Dht.State.ToString() ?? "";
+			json.open_files = engine?.DiskManager.OpenFiles ?? 0;
+			json.total_download_rate = engine?.TotalDownloadRate ?? 0;
+			json.total_upload_rate = engine?.TotalUploadRate ?? 0;
+			json.total_download_rate_text = Tools.DataSizeText(engine?.TotalDownloadRate ?? 0);
+			json.total_upload_rate_text = Tools.DataSizeText(engine?.TotalUploadRate ?? 0);
+
+			long dataBytesReceived = 0;
+			long dataBytesSent = 0;
+
+			//
+			// Torrents
+			//
+			dynamic torrents = new JArray();
+			lock (Globals.TorrentInfos)
+			{
+				foreach (var torrentInfo in Globals.TorrentInfos)
+				{
+					var torrentManager = torrentInfo.TorrentManager;
+
+					dynamic torrent = new JObject();
+
+					torrent.name = torrentInfo.Name;
+					torrent.hash = torrentInfo.Hash;
+					torrent.core = torrentInfo.Core;
+					torrent.type = torrentInfo.Type;
+					torrent.version = torrentInfo.Version;
+					torrent.magnet = torrentInfo.Magnet;
+
+					if (torrentInfo.DatFile != null)
+						torrent.dat = torrentInfo.DatFile;
+
+					torrent.file_count = torrentManager.Files.Count;
+					torrent.state = torrentManager.State.ToString();
+					torrent.has_metadata = torrentManager.HasMetadata;
+					torrent.open_connections = torrentManager.OpenConnections;
+
+					if (torrentManager.Error != null)
+						torrent.error = torrentManager.Error.Exception.ToString();
+
+					torrent.peers_available = torrentManager.Peers.Available;
+					torrent.peers_leechs = torrentManager.Peers.Leechs;
+					torrent.peers_seeds = torrentManager.Peers.Seeds;
+
+					torrent.bytes_received = torrentManager.Monitor.DataBytesReceived;
+					torrent.bytes_sent = torrentManager.Monitor.DataBytesSent;
+					torrent.bytes_received_text = Tools.DataSizeText(torrentManager.Monitor.DataBytesReceived);
+					torrent.bytes_sent_text = Tools.DataSizeText(torrentManager.Monitor.DataBytesSent);
+
+					dataBytesReceived += torrentManager.Monitor.DataBytesReceived;
+					dataBytesSent += torrentManager.Monitor.DataBytesSent;
+
+					torrents.Add(torrent);
+				}
+			}
+			json.torrents = torrents;
+
+			json.total_bytes_received = dataBytesReceived;
+			json.total_bytes_sent = dataBytesSent;
+
+			json.total_bytes_received_text = Tools.DataSizeText(dataBytesReceived);
+			json.total_bytes_sent_text = Tools.DataSizeText(dataBytesSent);
+
+			//
+			// Peer Listeners
+			//
+			// MonoTorrent 3.0.2 no longer exposes ClientEngine.PeerListeners, the
+			// field is kept so the JSON shape is unchanged. It is always empty.
+			//
+			json.peer_listeners = new JArray();
+
+			//
+			// Port Mappings
+			//
+			JArray portMappings = new JArray();
+			if (engine != null)
+			{
+				string[] portMappingsNames = new string[] { "Created", "Pending", "Failed" };
+				IReadOnlyList<Mapping>[] mappingsList = new IReadOnlyList<Mapping>[] { engine.PortMappings.Created, engine.PortMappings.Pending, engine.PortMappings.Failed };
+
+				for (int index = 0; index < mappingsList.Length; index++)
+				{
+					string portMappingsName = portMappingsNames[index];
+					IReadOnlyList<Mapping> mappings = mappingsList[index];
+
+					JArray mapsArray = new JArray();
+
+					foreach (Mapping mapping in mappings)
+					{
+						dynamic map = new JObject();
+						map.public_port = mapping.PublicPort;
+						map.protocol = mapping.Protocol.ToString();
+						mapsArray.Add(map);
+					}
+
+					dynamic maps = new JObject();
+					maps.name = portMappingsName;
+					maps.mappings = mapsArray;
+					portMappings.Add(maps);
+				}
+			}
+			json.port_mappings = portMappings;
+
+			writer.WriteLine(json.ToString(Formatting.Indented));
+		}
+
+		public void _api_stop_torrent(HttpListenerContext context, StreamWriter writer)
+		{
+			string hash = context.Request.QueryString["hash"] ?? throw new ApplicationException("hash not passed");
+
+			TorrentManager manager;
+			lock (Globals.TorrentInfos)
+				manager = Globals.TorrentInfos.Single(x => x.Hash == hash).TorrentManager;
+
+			_ = manager.StopAsync();
+
+			dynamic json = new JObject();
+			json.message = "OK";
+
+			writer.WriteLine(json.ToString(Formatting.Indented));
+		}
+
+		public void _api_start_torrent(HttpListenerContext context, StreamWriter writer)
+		{
+			string hash = context.Request.QueryString["hash"] ?? throw new ApplicationException("hash not passed");
+
+			TorrentManager manager;
+			lock (Globals.TorrentInfos)
+				manager = Globals.TorrentInfos.Single(x => x.Hash == hash).TorrentManager;
+
+			_ = manager.StartAsync();
+
+			dynamic json = new JObject();
+			json.message = "OK";
+
+			writer.WriteLine(json.ToString(Formatting.Indented));
+		}
+
+		public void _api_reload_torrent(HttpListenerContext context, StreamWriter writer)
+		{
+			string hash = context.Request.QueryString["hash"] ?? throw new ApplicationException("hash not passed");
+
+			TorrentInfo info;
+			lock (Globals.TorrentInfos)
+			{
+				info = Globals.TorrentInfos.Single(x => x.Hash == hash);
+				Globals.TorrentInfos.Remove(info);
+			}
+
+			_ = Task.Run(async () =>
+			{
+				try
+				{
+					await Globals.BitTorrent.Engine.RemoveAsync(info.Torrent, RemoveMode.KeepAllData);
+
+					string metadataDirectory = Path.Combine(Globals.DirectoryCache, "metadata");
+
+					info.Torrent = await Torrent.LoadAsync(Path.Combine(metadataDirectory, $"{hash}.torrent"));
+					info.TorrentManager = await Globals.BitTorrent.Engine.AddAsync(info.Torrent, Globals.DirectoryDownloads, Globals.BitTorrent.TorrentSettings);
+
+					// A freshly added torrent defaults every file to Normal.
+					await Globals.BitTorrent.SetAllFilesDoNotDownloadAsync(info.TorrentManager);
+
+					lock (Globals.TorrentInfos)
+					{
+						Globals.TorrentInfos.Add(info);
+					}
+				}
+				catch (Exception e)
+				{
+					Tools.ReportError(e, "Reload Torrent");
+				}
+			});
+
+			dynamic json = new JObject();
+			json.message = "OK";
+
+			writer.WriteLine(json.ToString(Formatting.Indented));
+		}
+
+		public void _api_files(HttpListenerContext context, StreamWriter writer)
+		{
+			if (Globals.ReadyTime == Globals.StartTime)
+				throw new ApplicationException("Not ready try in a bit");
+
+			string hash = context.Request.QueryString["hash"] ?? throw new ApplicationException("hash not passed");
+
+			string priority = context.Request.QueryString["priority"];
+
+			TorrentManager manager;
+			lock (Globals.TorrentInfos)
+				manager = Globals.TorrentInfos.Where(x => x.Hash == hash).Single().TorrentManager;
+
+			IEnumerable<ITorrentManagerFile> managerFiles = manager.Files;
+			if (priority != null)
+				managerFiles = manager.Files.Where(f => f.Priority == (Priority)Enum.Parse(typeof(Priority), priority)).ToList();
+
+			JArray files = new JArray();
+
+			foreach (var fileInfo in managerFiles)
+			{
+				dynamic file = new JObject();
+
+				file.path = fileInfo.Path;
+				file.priority = fileInfo.Priority.ToString();
+				file.length = fileInfo.Length;
+				file.piece_count = fileInfo.PieceCount;
+				file.percent_complete = fileInfo.BitField.PercentComplete;
+
+				files.Add(file);
+			}
+
+			writer.WriteLine(files.ToString(Formatting.Indented));
+		}
+
+		public void _api_file(HttpListenerContext context, StreamWriter writer)
+		{
+			if (Globals.ReadyTime == Globals.StartTime)
+				throw new ApplicationException("Not ready try in a bit");
+
+			Dictionary<string, string> parameters = new Dictionary<string, string>();
+			foreach (string valid in new string[] { "core", "machine", "list", "disk", "software" })
+			{
+				string qs = (context.Request.QueryString[valid] ?? "").Trim();
+				if (qs.Length > 0)
+					parameters.Add(valid, qs);
+			}
+			if (parameters.ContainsKey("core") == false)
+				parameters.Add("core", "mame");
+
+			string core = parameters["core"];
+
+			string type;
+			string path;
+
+			switch (core)
+			{
+				case "mame":
+				case "hbmame":
+					if (parameters.Count == 2 && parameters.ContainsKey("machine"))
+					{
+						type = "mr";
+						path = parameters["machine"] + ".zip";
+					}
+					else
+					{
+						if (parameters.Count == 3 && parameters.ContainsKey("machine") && parameters.ContainsKey("disk"))
+						{
+							type = "md";
+							path = Path.Combine(parameters["machine"], parameters["disk"] + ".chd");
+						}
+						else
+						{
+							if (parameters.Count == 3 && parameters.ContainsKey("list") && parameters.ContainsKey("software"))
+							{
+								type = "sr";
+								path = Path.Combine(parameters["list"], parameters["software"] + ".zip");
+							}
+							else
+							{
+								if (parameters.Count == 4 && parameters.ContainsKey("list") && parameters.ContainsKey("software") && parameters.ContainsKey("disk"))
+								{
+									type = "sd";
+									path = Path.Combine(parameters["list"], parameters["software"], parameters["disk"] + ".chd");
+								}
+								else
+								{
+									throw new ApplicationException("Bad Parameters");
+								}
+							}
+						}
+					}
+					break;
+
+				case "fbneo":
+					if (parameters.Count != 3 || parameters.ContainsKey("list") == false || parameters.ContainsKey("software") == false)
+						throw new ApplicationException("Bad Parameters");
+					type = "fbneo";
+					path = Path.Combine(parameters["list"], parameters["software"] + ".zip");
+					break;
+
+				case "pinmame":
+					if (parameters.Count != 2 || parameters.ContainsKey("machine") == false)
+						throw new ApplicationException("Bad Parameters");
+					type = "pinmame";
+					path = parameters["machine"] + ".zip";
+					break;
+
+				case "pinball-future":
+				case "pinball-visual":
+					if (parameters.Count != 3 || parameters.ContainsKey("list") == false || parameters.ContainsKey("software") == false)
+						throw new ApplicationException("Bad Parameters");
+					var parts = core.Split('-');
+					core = parts[0];
+					type = parts[1];
+					path = Path.Combine(parameters["list"], parameters["software"] + ".zip");
+					break;
+
+				default:
+					throw new ApplicationException($"Bad core: {core}");
+			}
+
+			TorrentInfo torrentInfo;
+			lock (Globals.TorrentInfos)
+				torrentInfo = Globals.TorrentInfos.Single(x => x.Core == core && x.Type == type);
+			TorrentManager manager = torrentInfo.TorrentManager;
+
+			IEnumerable<ITorrentManagerFile> files = manager.Files.Where(f => f.Path == path);
+
+			if (files.Count() == 0)
+			{
+				ApplicationException exception = new ApplicationException($"Not found {type}	{path}");
+				exception.Data["status"] = 404;
+				throw exception;
+			}
+
+			ITorrentManagerFile fileInfo = files.Single();
+
+			if (fileInfo.Priority != Priority.Highest)
+				manager.SetFilePriorityAsync(fileInfo, Priority.Highest).GetAwaiter().GetResult();
+
+			if (fileInfo.BitField.PercentComplete == 100.0D)
+				Globals.BitTorrent.Engine.DiskManager.FlushAsync(manager).GetAwaiter().GetResult();
+
+			dynamic file = new JObject();
+
+			file.path = fileInfo.Path;
+			file.percent_complete = fileInfo.BitField.PercentComplete;
+			file.length = fileInfo.Length;
+			file.priority = fileInfo.Priority.ToString();
+			file.filename = fileInfo.FullPath;
+			file.piece_start_index = fileInfo.StartPieceIndex;
+			file.piece_count = fileInfo.PieceCount;
+			file.torrent_hash = torrentInfo.Hash;
+
+			writer.WriteLine(file.ToString(Formatting.Indented));
+		}
+
+		public void _api_stop(HttpListenerContext context, StreamWriter writer)
+		{
+			//
+			// Deliberately not gated on "ready": a daemon that is stuck retrying the
+			// torrent feed must still be stoppable.
+			//
+			Globals.BitTorrent?.AskStopNow();
+
+			dynamic json = new JObject();
+			json.message = "OK";
+
+			writer.WriteLine(json.ToString(Formatting.Indented));
+		}
+
+		private readonly byte[] _FavIcon = Convert.FromBase64String(@"
+			AAABAAEAEBAAAAAAGABoAwAAFgAAACgAAAAQAAAAIAAAAAEAGAAAAAAAAAMAAAAAAAAAAAAAAAAA
+			AAAAAAD0tgDzuQDzsgD2xgD99NT++OP++OX++OX/+OPA67QA6t3j6KL/9tr++OP9+OX9+OX0vQD0
+			vgD99dj///T/75P/6m7/6mv/6Wz/4ne+3G4A7Obg2EL/3F7/3Vv/32v84nnysAD99+P/9MThrQCV
+			aACCXQCCXQCgcgDyoQC9vwAA8PesvwCDyQB/ygDQswD/rQD0uwD//e/vsgBEMgAJDiUdGh8bGh8H
+			DCZzTADEwwAA8/8A8/8A8/8A8/8A8fjBwwD+/PX/1gC+hgAUFiLCjQDvrQDysACgdgAsGgyxtQAA
+			+P873pbetQDbtQAN5LcA79X//vv2uwDkogDQlwDoqADdoADlpwCRawAtGwuwtgAA9v7AvAD/qgD/
+			qQCpwgAA+f/+/PXztQD9tQCqfQAgHBwUFiIWFiIFCid8UgDAwwAA8PfXtgD3rQD7rAC+vQAA9//+
+			/PX4ugDYmwAbGR9cRgCZcQCRagCtfwD/swC9wQAA8PvUtwD5rQD8rAC9vQAA+P///fn+wgC2gwAX
+			FyHqqgD/xAD/xADcnwB8UwCytwAA9/+MywD/qAD/qAB10ToA9////fX7zwDYmAAeGx5vVACgdgCi
+			dwBRPgA2IQG5vAAA9v8A8f9z0URv0kkA9v9p2Vj76Jv977v7sgCQaQASEyITFCISEyIdGh+6fwDH
+			xQAA7uwg4a4A8/8A9P9U12/7swDzuQD//fn1wAD2rgDbngDUmQDTmQDhowD6swDqsQDSuADyrwDX
+			tgDVswD5sgD/7KDxrgD977/98MbzsAD3sAD4swD4swD2sgDyrwD0rgD5rQD0rwD3qQD5swD+8MD/
+			/vPxrADysAD+/fX75Y7ysgDxqwDyrgDyrwDyrwDyrwDyrgDxqgDztQD977n99+D0swDyrwDxqwDz
+			sgD//fn98sz0vwDyrgDxqwDxqgDxqwDyrwD1xQD9+OL+/PXysgD1rADyrwDyrwDxrQDztQD889D/
+			/fn989P75pT53mj76J399dv//fn87rjzswDyrADxrAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+			AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+		");
+
+		private readonly string HTML = @"<!DOCTYPE html>
+<html>
+<head><title>DOME-BT</title></head>
+<body>
+
+<h1>DOME-BT</h1>
+<p>Welcome to DOME-BT a Bit Torrent client for use with MAME-AO.</p>
+<p>
+	<a href=""https://github.com/sam-ludlow/dome-bt"" target=""_blank"" >https://github.com/sam-ludlow/dome-bt</a>	<br/>
+	<a href=""https://github.com/sam-ludlow/mame-ao"" target=""_blank"" >https://github.com/sam-ludlow/mame-ao</a>	<br/>
+</p>
+
+<h2>DOME-BT API Info</h2>
+<p>
+	<a href=""http://localhost:12381/api/info"" target=""_blank"" >http://localhost:12381/api/info</a>
+</p>
+
+<h2>Torrent File List</h2>
+<p>
+	http://localhost:12381/api/files?hash=@&priority=@	<br/>
+</p>
+
+<h2>Download URLS</h2>
+<p>To begin a download, perform a GET you can then poll the same URL until the file is downloaded.</p>
+
+<h3>MAME</h3>
+<p>
+	http://localhost:12381/api/file?core=mame&machine=@	<br/>
+	http://localhost:12381/api/file?core=mame&machine=@&disk=@	<br/>
+	http://localhost:12381/api/file?core=mame&list=@&software=@	<br/>
+	http://localhost:12381/api/file?core=mame&list=@&software=@&disk=@	<br/>
+</p>
+
+<h3>HBMAME</h3>
+<p>
+	http://localhost:12381/api/file?core=hbmame&machine=@	<br/>
+	http://localhost:12381/api/file?core=hbmame&machine=@&disk=@	<br/>
+	http://localhost:12381/api/file?core=hbmame&list=@&software=@	<br/>
+</p>
+
+<h3>FBNeo</h3>
+<p>
+	http://localhost:12381/api/file?core=fbneo&list=@&software=@	<br/>
+</p>
+
+<h3>PinMAME</h3>
+<p>
+	http://localhost:12381/api/file?core=pinmame&machine=@	<br/>
+</p>
+
+<h3>Pinball</h3>
+<p>
+	http://localhost:12381/api/file?core=pinball-future&list=@&software=@	<br/>
+	http://localhost:12381/api/file?core=pinball-visual&list=@&software=@	<br/>
+</p>
+
+</body>
+</html>
+";
+	}
+}
