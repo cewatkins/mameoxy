@@ -18,7 +18,23 @@
   <ItemGroup>
     <ProjectReference Include="..\MameAo.Core\MameAo.Core.csproj" />
     <ProjectReference Include="..\MameAo.Platform.Linux\MameAo.Platform.Linux.csproj" />
+    <!-- ReferenceOutputAssembly=false: the BitTorrent client is a separate
+         program, not a library. The reference only guarantees build order. -->
+    <ProjectReference Include="..\MameAo.Bt\MameAo.Bt.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <!--
+    Development convenience: a plain build (not a single-file publish) copies
+    the BitTorrent client next to mame-ao so it can be found there. Release
+    tarballs embed it instead, and the publish output must stay single-file.
+  -->
+  <Target Name="CopyDomeBtForDevelopment" AfterTargets="Build"
+          Condition="'$(PublishSingleFile)' != 'true'">
+    <ItemGroup>
+      <DomeBtDevelopmentBinary Include="$(MSBuildThisFileDirectory)../MameAo.Bt/bin/$(Configuration)/$(TargetFramework)/dome-bt" />
+    </ItemGroup>
+    <Copy SourceFiles="@(DomeBtDevelopmentBinary)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('@(DomeBtDevelopmentBinary)')" />
+  </Target>
 
   <!--
     Release builds pass -p:DomeBtBinary=<published dome-bt> so the tarball is a
