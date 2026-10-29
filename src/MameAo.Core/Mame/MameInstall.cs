@@ -162,6 +162,29 @@ namespace Spludlow.MameAO
 	/// </summary>
 	public static class MameLocator
 	{
+		/// <summary>
+		/// A directory MAME may write into without touching the user's working
+		/// directory. The scratch directory is preferred; the system temp
+		/// directory is the fallback when the host has not set one up yet.
+		/// </summary>
+		private static string ProbeWorkingDirectory()
+		{
+			string directory = Globals.TempDirectory;
+
+			if (string.IsNullOrWhiteSpace(directory) == true)
+				directory = Path.GetTempPath();
+
+			try
+			{
+				Directory.CreateDirectory(directory);
+				return directory;
+			}
+			catch (Exception)
+			{
+				return Path.GetTempPath();
+			}
+		}
+
 		public static MameInstall Locate(string explicitPath, Func<string, string> getEnv = null)
 		{
 			getEnv ??= Environment.GetEnvironmentVariable;
@@ -211,8 +234,13 @@ namespace Spludlow.MameAO
 
 		private static MameInstall Probe(MameProviderKind kind, string[] prefix, string detail)
 		{
+			// MAME writes its configuration files into its working directory.
+			// Probing must not litter the directory the user started mame-ao in,
+			// so the probes run in the scratch directory.
+			string probeDirectory = ProbeWorkingDirectory();
+
 			ProcessResult version = MameProcess.Run(
-				prefix.Concat(new[] { "-version" }).ToArray(), null, TimeSpan.FromSeconds(30));
+				prefix.Concat(new[] { "-version" }).ToArray(), probeDirectory, TimeSpan.FromSeconds(30));
 
 			if (version.TimedOut == true)
 				throw new MameNotFoundException($"'{string.Join(' ', prefix)} -version' timed out.", new[] { detail });
@@ -230,7 +258,7 @@ namespace Spludlow.MameAO
 			string directoryVersion = VersionToDirectoryName(versionRaw);
 
 			ProcessResult config = MameProcess.Run(
-				prefix.Concat(new[] { "-showconfig" }).ToArray(), null, TimeSpan.FromSeconds(60));
+				prefix.Concat(new[] { "-showconfig" }).ToArray(), probeDirectory, TimeSpan.FromSeconds(60));
 
 			string homePath = ParseConfigValue(config.StandardOutput, "homepath");
 			string hashPathRaw = ParseConfigValue(config.StandardOutput, "hashpath");
