@@ -103,8 +103,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The updater looks for "*-linux-<arch>.tar.gz", so the assets are
+          # renamed to carry the version rather than the branch or commit.
+          mkdir -p release
+          for archive in artifacts/*.tar.gz; do
+            [ -e "$archive" ] || continue
+            arch="$(basename "$archive" | sed -E 's/.*-(linux-(x64|arm64))\.tar\.gz/\1/')"
+            cp "$archive" "release/mame-ao-${version}-${arch}.tar.gz"
+          done
+          ls -l release
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "mame-ao ${GITHUB_REF_NAME#v}" \
+            --title "mame-ao ${version}" \
             --notes "Linux builds (.NET 10, self-contained, single file)." \
-            artifacts/*
+            release/*

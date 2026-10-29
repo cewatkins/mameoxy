@@ -70,11 +70,10 @@ namespace Spludlow.MameAO
 
 		/// <summary>
 		/// owner/repo that publishes this port's Linux release tarballs, from
-		/// MAME_AO_UPDATE_REPO. Empty means self-update is disabled: the port
-		/// version (0.10) and upstream's tag scheme (1.185) are not comparable, so
-		/// offering ".up" against upstream would download a Windows build.
+		/// MAME_AO_UPDATE_REPO. Defaults to the repository this port is published
+		/// from; set it to a fork to follow that fork's releases instead.
 		/// </summary>
-		public static string UpdateRepo = Environment.GetEnvironmentVariable("MAME_AO_UPDATE_REPO") ?? "";
+		public static string UpdateRepo = Environment.GetEnvironmentVariable("MAME_AO_UPDATE_REPO") ?? "cewatkins/mameoxy";
 
 		public static long DownloadDotSize = 1024 * 1024;
 
@@ -369,12 +368,16 @@ $$ | \_/ $$ |$$ |  $$ |$$ | \_/ $$ |$$$$$$$$\       $$ |  $$ | $$$$$$  |
 			}
 			else if (string.IsNullOrEmpty(tag_name) == true)
 			{
-				Tools.ConsoleHeading(2, new string[] {
-					$"Could not check {Globals.UpdateRepo} for a new mame-ao release (offline or GitHub rate limited).",
-					updateRepository.LoadError ?? "",
-				});
+				Tools.ConsoleHeading(2, string.IsNullOrEmpty(updateRepository.LoadError) == true
+					? new string[] {
+						$"{Globals.UpdateRepo} has no published release yet.",
+					}
+					: new string[] {
+						$"Could not check {Globals.UpdateRepo} for a new mame-ao release (offline or GitHub rate limited).",
+						updateRepository.LoadError ?? "",
+					});
 			}
-			else if (Globals.AssemblyVersion != tag_name)
+			else if (Globals.AssemblyVersion != NormaliseVersion(tag_name))
 				Tools.ConsoleHeading(1, new string[] {
 					"New MAME-AO version available",
 					"",
@@ -384,6 +387,29 @@ $$ | \_/ $$ |$$ |  $$ |$$ | \_/ $$ |$$$$$$$$\       $$ |  $$ | $$$$$$  |
 				});
 
 			Console.WriteLine("");
+		}
+
+		/// <summary>
+		/// Release tags are "v0.10.0"; the assembly version is "major.minor".
+		/// Compare what they mean, not their spelling, or every start would
+		/// report a new version.
+		/// </summary>
+		public static string NormaliseVersion(string tag)
+		{
+			if (string.IsNullOrWhiteSpace(tag) == true)
+				return "";
+
+			string trimmed = tag.Trim();
+
+			if (trimmed.StartsWith("v", StringComparison.OrdinalIgnoreCase) == true)
+				trimmed = trimmed.Substring(1);
+
+			string[] parts = trimmed.Split('.');
+
+			if (parts.Length < 2)
+				return trimmed;
+
+			return $"{parts[0]}.{parts[1]}";
 		}
 
 		/// <summary>

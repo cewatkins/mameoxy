@@ -51,7 +51,7 @@ namespace Spludlow.MameAO
 					"Cannot check for a new version: GitHub metadata is unavailable (offline or rate limited). " +
 					(repo.LoadError ?? ""));
 
-			if (repo.tag_name == Globals.AssemblyVersion)
+			if (MameAOProcessor.NormaliseVersion(repo.tag_name) == Globals.AssemblyVersion)
 			{
 				Console.WriteLine($"mame-ao is already up to date ({Globals.AssemblyVersion}).");
 				return;
@@ -129,11 +129,47 @@ namespace Spludlow.MameAO
 					$"If mame-ao came from a package manager or /usr/local, update it that way instead.", e);
 			}
 
+			CopySideFiles(updateDirectory, Path.GetDirectoryName(executable));
+
 			File.Delete(archiveFilename);
 
 			Console.WriteLine($"Updated {executable}. Re-executing...");
 
 			ReExec(executable);
+		}
+
+		/// <summary>
+		/// The UI is a separate file next to the executable, so it has to be
+		/// updated as well; leaving the old one would mean a new binary serving
+		/// an old UI.
+		/// </summary>
+		private static void CopySideFiles(string updateDirectory, string targetDirectory)
+		{
+			if (string.IsNullOrWhiteSpace(targetDirectory) == true)
+				return;
+
+			foreach (string name in new string[] { "UI.html", "LINUX.md", "mame-ao.service" })
+			{
+				string source = null;
+
+				foreach (string candidate in Directory.GetFiles(updateDirectory, name, SearchOption.AllDirectories))
+				{
+					source = candidate;
+					break;
+				}
+
+				if (source == null)
+					continue;
+
+				try
+				{
+					File.Copy(source, Path.Combine(targetDirectory, name), true);
+				}
+				catch (Exception e)
+				{
+					Console.WriteLine($"Could not update '{name}': {e.Message}");
+				}
+			}
 		}
 
 		private static string ResolveSymlinks(string filename)
