@@ -1033,12 +1033,14 @@ working directory: MAME is started with an explicit `-inipath` and argv lists
 
 ### 12.3 Deviations from the Windows original
 
-1. **Self-update is opt-in.** Upstream's latest tag (1.185) and this port's
-   version (0.10) are not comparable, and upstream releases are Windows zips;
-   `.up` would replace the binary with something that does not run. `MAME_AO_UPDATE_REPO=owner/repo`
-   enables it (expects `mame-ao-linux-<arch>.tar.gz`); otherwise `.up` and
-   `/api/info` report that it is not configured. Unconfigured builds no longer
-   fetch GitHub metadata for mame-ao at all.
+1. **Self-update points at this port, not at upstream.** Upstream's tags
+   (1.185) and this port's version (0.10) are not comparable, and upstream
+   releases are Windows zips, so `.up` would replace the binary with something
+   that does not run. It uses `cewatkins/mameoxy` by default
+   (`MAME_AO_UPDATE_REPO=owner/repo` follows a fork), expects assets named
+   `mame-ao-<version>-linux-<arch>.tar.gz`, compares tags by major.minor
+   (`v0.10.0` is version `0.10`), and refreshes `UI.html` next to the
+   executable so a new binary never serves an old UI.
 2. **The BitTorrent client is embedded, not downloaded.** `pack.sh` publishes
    `dome-bt` for the same RID and embeds it as a resource; the host unpacks it to
    `<cache>/bin/dome-bt` (0755) on first use and exports `MAME_AO_DOME_BT`.
@@ -1110,3 +1112,13 @@ Not proven here:
 * A second real MAME version: the rebuild gate was exercised with a wrapper that
   reports `0.289` (`.run3`), which creates `mame/0289` and rebuilds; the MAME
   binary itself is unchanged.
+* `.up` against a published release: the release assets did not exist until the
+  first tag was pushed, so the update path was checked against the release
+  workflow and the asset naming rather than by replacing a running binary.
+
+### 13.1 Published artefacts
+
+Tagging `v0.10.0` runs the release workflow, which publishes
+`mame-ao-0.10.0-linux-x64.tar.gz` and `mame-ao-0.10.0-linux-arm64.tar.gz`.
+CI builds both on native runners (x64 and arm64), smoke-tests the packed
+binary (`--version`, `--help`), and uploads the tarballs as release assets.

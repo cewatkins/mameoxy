@@ -147,7 +147,7 @@ Type these at the `MAME 0285>` prompt (or send them as
 | `.bt` | start the BitTorrent client |
 | `.creds` | enter archive.org credentials interactively |
 | `.what` | show what the installed MAME is |
-| `.up` | self-update (needs `MAME_AO_UPDATE_REPO`) |
+| `.up` | self-update: fetches the release for your architecture and replaces the executable (set `MAME_AO_UPDATE_REPO` to follow a fork) |
 | `apexc` | launch a machine |
 | `apexc -seconds_to_run 5` | launch and exit after 5 emulated seconds (headless testing) |
 

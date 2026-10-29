@@ -131,22 +131,23 @@ The client listens on `127.0.0.1:12381`; `MAMEAO_BT_HTTP_PORT` moves it.
 
 ## Self update (`.up`)
 
-`.up` replaces the running executable with the tarball for the current
+`.up` replaces the running executable with the release tarball for the current
 architecture and re-executes it in place, keeping the PID (so a systemd unit
-does not restart).
+does not restart). `UI.html` and the docs next to the executable are updated
+too.
 
-The upstream releases are Windows builds, so this port does **not** point at
-them by default. Set the repository that publishes your Linux tarballs:
+It updates from this port's own releases
+([cewatkins/mameoxy](https://github.com/cewatkins/mameoxy)) by default. To
+follow a fork instead:
 
 ```sh
 export MAME_AO_UPDATE_REPO=owner/repo       # releases must contain
-                                            # mame-ao-linux-x64.tar.gz /
-                                            # mame-ao-linux-arm64.tar.gz
+                                            # mame-ao-<version>-linux-x64.tar.gz /
+                                            # mame-ao-<version>-linux-arm64.tar.gz
 ```
 
-Without it, `.up` explains that self-update is not configured and does nothing
-else. Installing from the tarball with your own package manager is the
-supported path.
+If the binary was installed by a package manager, `.up` refuses to overwrite it
+and says so; update it the way you installed it.
 
 ## Not available on Linux
 
