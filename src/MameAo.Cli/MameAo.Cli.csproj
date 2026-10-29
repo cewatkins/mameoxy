@@ -20,7 +20,7 @@
     <ProjectReference Include="..\MameAo.Platform.Linux\MameAo.Platform.Linux.csproj" />
     <!-- ReferenceOutputAssembly=false: the BitTorrent client is a separate
          program, not a library. The reference only guarantees build order. -->
-    <ProjectReference Include="..\MameAo.Bt\MameAo.Bt.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\MameAo.Bt\MameAo.Bt.csproj" ReferenceOutputAssembly="false" ExcludeAssets="all" Private="false" />
   </ItemGroup>
 
   <!--
