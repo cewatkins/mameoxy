@@ -246,7 +246,23 @@ namespace Spludlow.MameAO
 				return;
 			}
 
-			Start();
+			try
+			{
+				Start();
+			}
+			catch (Exception e)
+			{
+				// BitTorrent is optional: archive.org downloads still work without
+				// it, so a broken client must not stop the program.
+				Tools.ConsoleHeading(3, new string[] {
+					"The BitTorrent client could not be started, continuing without it.",
+					e.Message,
+				});
+
+				Globals.BitTorrentAvailable = false;
+				return;
+			}
+
 			Globals.BitTorrentAvailable = true;
 		}
 
@@ -329,8 +345,17 @@ namespace Spludlow.MameAO
 				process.StartInfo = startInfo;
 				process.Start();
 
+				// A managed apphost that cannot find its own .dll exits at once with
+				// a message on stderr; wait a moment so that is reported as the
+				// cause instead of a later "Failed to connect".
+				process.WaitForExit(2000);
+
 				if (process.HasExited == true)
-					throw new ApplicationException($"DOME-BT exited imediatly after starting {process.ExitCode}.");
+					throw new ApplicationException(
+						$"DOME-BT exited immediately after starting (exit code {process.ExitCode}). " +
+						$"'{exeFilename}' must be able to find its own files next to it " +
+						"(dome-bt.dll, dome-bt.runtimeconfig.json). " +
+						"Set MAME_AO_DOME_BT to a working client if this one is incomplete.");
 			}
 			Console.WriteLine("...done");
 		}
